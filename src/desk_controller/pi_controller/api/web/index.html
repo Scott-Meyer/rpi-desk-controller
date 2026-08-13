@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Desk Controller Setup</title>
+    <link rel="stylesheet" href="/config/assets/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Raspberry Pi desk controller</p>
+          <h1>Configuration</h1>
+          <p class="lede">Connections, hardware routing, and Stream Deck controls in one place.</p>
+        </div>
+        <div id="connectionBadge" class="badge">Loading…</div>
+      </header>
+
+      <nav class="tabs" aria-label="Configuration sections">
+        <a class="tab active" href="?tab=connections" data-section="connections" aria-current="page">Connections</a>
+        <a class="tab" href="?tab=hardware" data-section="hardware">Hardware</a>
+        <a class="tab" href="?tab=controls" data-section="controls">Controls</a>
+      </nav>
+
+      <form id="configForm">
+        <section id="connections" class="panel active">
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Message bus</p>
+              <h2>MQTT</h2>
+            </div>
+            <span id="mqttSecretState" class="status"></span>
+          </div>
+          <div id="mqttHealth" class="connection-health checking">
+            <span class="health-dot" aria-hidden="true"></span>
+            <div>
+              <strong id="mqttConnectionState">Checking connection…</strong>
+              <span id="mqttConnectionDetail">Reading the live broker session.</span>
+            </div>
+          </div>
+          <div class="grid">
+            <label>Broker location
+              <select id="mqttMode">
+                <option value="external">External broker</option>
+                <option value="local">Hosted by this Pi</option>
+              </select>
+            </label>
+            <label>Broker<input id="mqttBroker" required autocomplete="off"></label>
+            <label>Port<input id="mqttPort" type="number" min="1" max="65535" required></label>
+            <label>Username<input id="mqttUsername" autocomplete="username"></label>
+            <label>Password<input id="mqttPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label>
+          </div>
+          <p id="localBrokerNote" class="note" hidden>Desk Controller will use Mosquitto on this Pi. Connect workstation agents to this Pi's LAN address and port 1883. The setup script installs and starts the broker for a trusted private LAN.</p>
+          <label class="check"><input id="clearMqttPassword" type="checkbox"> Clear the saved MQTT password</label>
+
+          <div class="divider"></div>
+
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Automation</p>
+              <h2>Home Assistant</h2>
+            </div>
+            <label class="switch"><input id="haEnabled" type="checkbox"><span></span> Enabled</label>
+          </div>
+          <div id="haHealth" class="connection-health checking">
+            <span class="health-dot" aria-hidden="true"></span>
+            <div>
+              <strong id="haConnectionState">Checking authentication…</strong>
+              <span id="haConnectionDetail">Validating API access without changing Home Assistant.</span>
+            </div>
+          </div>
+          <div class="grid">
+            <label class="wide">Base URL<input id="haUrl" type="url" required></label>
+            <label class="wide">Long-lived access token<input id="haToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label>
+          </div>
+          <p id="haSecretState" class="note"></p>
+          <label class="check"><input id="clearHaToken" type="checkbox"> Clear the saved Home Assistant token</label>
+        </section>
+
+        <section id="hardware" class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="kicker">USB switching</p>
+              <h2>USB host switch</h2>
+            </div>
+            <label class="switch"><input id="simulateHardware" type="checkbox"><span></span> Simulation</label>
+          </div>
+          <div class="grid">
+            <label>Controller type
+              <select id="usbSwitchDriver">
+                <option value="acroname">Acroname programmable hub</option>
+                <option value="ugreen_cm691_gpio">UGREEN CM691 via GPIO relay</option>
+              </select>
+            </label>
+            <label id="acronameSerialField">Acroname serial number<input id="acronameSerial" placeholder="0x00000000"></label>
+            <label>Startup / fallback host<select id="defaultChannel"><option value="0">PC 1</option><option value="1">PC 2</option></select></label>
+            <label class="ugreen-setting" hidden>Relay BCM GPIO<input id="usbSwitchGpioPin" type="number" min="2" max="27"></label>
+            <label class="ugreen-setting" hidden>Button pulse (ms)<input id="usbSwitchPulseMs" type="number" min="50" max="2000"></label>
+            <label class="check ugreen-setting" hidden><input id="usbSwitchActiveHigh" type="checkbox"> Relay input is active-high</label>
+            <label class="check ugreen-setting" hidden><input id="usbObservationEnabled" type="checkbox"> Verify the active host with a USB sentinel</label>
+            <label class="ugreen-setting sentinel-setting" hidden>Sentinel vendor ID<input id="usbSentinelVendorId" placeholder="0x046d"></label>
+            <label class="ugreen-setting sentinel-setting" hidden>Sentinel product ID<input id="usbSentinelProductId" placeholder="0x0825"></label>
+            <label class="ugreen-setting sentinel-setting" hidden>Sentinel serial number<input id="usbSentinelSerial" placeholder="Optional"></label>
+            <label class="ugreen-setting sentinel-setting" hidden>Observation interval (seconds)<input id="usbObservationPollInterval" type="number" min="1" max="30"></label>
+            <label class="ugreen-setting sentinel-setting" hidden>Verification timeout (seconds)<input id="usbObservationTimeout" type="number" min="3" max="60"></label>
+            <label>PC 1 workstation ID<input id="workstationPc1" required></label>
+            <label>PC 2 workstation ID<input id="workstationPc2" required></label>
+          </div>
+          <p id="ugreenWiringNote" class="note" hidden>Use an isolated relay or optocoupler in parallel with the included desktop-controller button. Never connect the switch control cable directly to a Raspberry Pi GPIO. Without sentinel observation, the startup host must match the illuminated host and manual button presses cannot be detected.</p>
+          <p id="sentinelNote" class="note" hidden>Choose one USB device that is always connected through the switch. Both workstation agents will watch for this VID/PID and optional serial number; the Pi commits a switch only after the target computer reports the sentinel present.</p>
+
+          <div class="divider"></div>
+
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Distributed transaction</p>
+              <h2>KVM control ownership</h2>
+            </div>
+          </div>
+          <div class="grid three">
+            <label>Monitor input controller
+              <select id="monitorController">
+                <option value="pi">Raspberry Pi</option>
+                <option value="active_workstation">Active workstation agent</option>
+                <option value="pc1">PC 1 agent</option>
+                <option value="pc2">PC 2 agent</option>
+              </select>
+            </label>
+            <label>USB host controller
+              <select id="usbController">
+                <option value="pi">Raspberry Pi</option>
+                <option value="active_workstation">Active workstation agent</option>
+                <option value="pc1">PC 1 agent</option>
+                <option value="pc2">PC 2 agent</option>
+              </select>
+            </label>
+            <label>Remote step timeout
+              <select id="remoteKvmTimeout">
+                <option value="5">5 seconds</option>
+                <option value="10">10 seconds</option>
+                <option value="15">15 seconds</option>
+                <option value="20">20 seconds</option>
+                <option value="30">30 seconds</option>
+              </select>
+            </label>
+          </div>
+          <p class="note">The Pi remains the coordinator. Agent-controlled steps are acknowledged before the KVM state commits, and USB is rolled back if the monitor step fails.</p>
+
+          <div class="divider"></div>
+
+          <div class="section-heading">
+            <div>
+              <p class="kicker">DDC/CI routing</p>
+              <h2>Monitor</h2>
+            </div>
+          </div>
+          <div class="grid three">
+            <label>Display ID<input id="displayId" type="number" min="1" required></label>
+            <label>PC 1 input<input id="pc1Input" required placeholder="0x0f"></label>
+            <label>PC 2 input<input id="pc2Input" required placeholder="0x11"></label>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Controller status</p>
+              <h2>Live USB hardware</h2>
+            </div>
+            <button type="button" id="refreshHub" class="secondary compact-button">Refresh</button>
+          </div>
+          <div class="hub-summary">
+            <div><span>Status</span><strong id="hubConnection">Loading…</strong></div>
+            <div><span>Controller</span><strong id="hubIdentity">—</strong></div>
+            <div><span>USB synchronization</span><strong id="hubSyncStatus">—</strong></div>
+            <div><span>Firmware</span><strong id="hubFirmware">—</strong></div>
+            <div><span>Input</span><strong id="hubInputPower">—</strong></div>
+            <div><span>Temperature</span><strong id="hubTemperature">—</strong></div>
+            <label>Hub name<input id="hubName" maxlength="128"></label>
+            <label>Active host
+              <select id="hubActiveUpstream">
+                <option value="0">PC 1</option>
+                <option value="1">PC 2</option>
+              </select>
+            </label>
+            <button type="button" id="syncUsbHost" class="secondary">Force USB to selected KVM host</button>
+          </div>
+          <p id="hubMessage" class="note" role="status">Reading the USB controller…</p>
+          <div id="usbPorts" class="port-grid"></div>
+
+          <div class="divider"></div>
+
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Polling</p>
+              <h2>Telemetry publishing</h2>
+            </div>
+            <label class="compact">MQTT refresh
+              <select id="hubTelemetryInterval">
+                <option value="2">2 seconds</option>
+                <option value="5">5 seconds</option>
+                <option value="10">10 seconds</option>
+                <option value="30">30 seconds</option>
+                <option value="60">1 minute</option>
+              </select>
+            </label>
+          </div>
+          <p class="note">Friendly names are saved in this controller. Detected product, manufacturer, serial number, VID:PID, electrical readings, errors, and line state come live from the hub.</p>
+        </section>
+
+        <section id="controls" class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Physical interface</p>
+              <h2>Stream Deck</h2>
+            </div>
+            <output id="brightnessValue">85%</output>
+          </div>
+          <label>Brightness<input id="brightness" type="range" min="0" max="100" value="85"></label>
+          <div class="grid">
+            <label>Pending retry window (seconds)<input id="pendingRequestTimeout" type="number" min="5" max="86400" value="300" required></label>
+            <label>Retry interval (seconds)<input id="pendingRetryInterval" type="number" min="1" max="3600" value="5" required></label>
+          </div>
+          <p class="note">Laptop-bound keys get a dotted yellow border until the desktop confirms the action or this retry window expires.</p>
+
+          <div class="divider"></div>
+
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Physical 5 × 3 layout</p>
+              <h2>Button map</h2>
+            </div>
+            <span class="status">Select a key to edit it</span>
+          </div>
+          <p class="note deck-note">Every physical press is published to MQTT, including empty keys. Buttons in the same group are mutually exclusive, so only the active audio, lighting, or shade profile glows.</p>
+
+          <div class="deck-workspace">
+            <div>
+              <div id="deckGrid" class="deck-grid" aria-label="Stream Deck physical layout"></div>
+              <div class="mqtt-contract">
+                <span>Simple action</span><code>…/streamdeck/action</code>
+                <span>Rich event</span><code>…/streamdeck/event</code>
+                <span>Reactive state</span><code>…/streamdeck/state</code>
+              </div>
+            </div>
+
+            <fieldset id="buttonEditor" class="button-editor">
+              <legend>Key <span id="selectedKeyNumber">1</span></legend>
+              <label class="check editor-enable"><input id="buttonEnabled" type="checkbox"> Show and run this button</label>
+              <div class="grid">
+                <label>Label<textarea id="buttonLabel" rows="2" placeholder="Two lines are supported"></textarea></label>
+                <label>State group<input id="buttonGroup" list="groupSuggestions" placeholder="audio, lighting, shades"></label>
+                <label>Action
+                  <select id="buttonAction">
+                    <option value="none">MQTT event only</option>
+                    <option value="kvm_toggle">Switch KVM host</option>
+                    <option value="current_time">Show current time</option>
+                    <option value="current_date">Show current date</option>
+                    <option value="audio_output">Select audio output</option>
+                    <option value="ha_scene">Activate HA scene</option>
+                    <option value="ha_service">Call Home Assistant service</option>
+                    <option value="mqtt">Publish custom MQTT</option>
+                    <option value="workstation_slot" hidden>Legacy computer slot</option>
+                  </select>
+                </label>
+                <label>Icon
+                  <select id="buttonIcon">
+                    <option value="none">None</option>
+                    <option value="kvm">KVM display</option>
+                    <option value="speakers">Speakers</option>
+                    <option value="mute">Mute</option>
+                    <option value="play">Play</option>
+                    <option value="pause">Pause</option>
+                    <option value="headphones">Headphones</option>
+                    <option value="wireless_headphones">Wireless headphones</option>
+                    <option value="earbuds">Microphone / earbuds</option>
+                    <option value="bulb">Light bulb</option>
+                    <option value="moon">Moon</option>
+                    <option value="sun">Sun</option>
+                    <option value="shades_close">Shades closed</option>
+                    <option value="shades_privacy">Shades privacy</option>
+                    <option value="shades_extra_light">Shades extra light</option>
+                  </select>
+                </label>
+                <label>Accent color<input id="buttonColor" type="color" value="#00c8ff"></label>
+                <label id="targetField">Action target<input id="buttonTarget"></label>
+                <label id="offTargetField">Second press / off automation<input id="buttonOffTarget" placeholder="automation.turn_off…"></label>
+                <label id="haServiceField">Home Assistant service<input id="buttonService" placeholder="light.toggle"></label>
+                <label id="haServiceDataField">Service data (JSON)<textarea id="buttonServiceData" rows="3" placeholder='{"brightness_pct": 50}'></textarea></label>
+                <label id="mqttTopicField">Custom MQTT topic<input id="buttonMqttTopic"></label>
+                <label id="mqttPayloadField">Custom MQTT payload<input id="buttonMqttPayload"></label>
+                <label id="slotIdField" hidden>Legacy computer slot ID<input id="buttonSlotId"></label>
+                <label>Feedback MQTT topic<input id="buttonStateTopic" placeholder="Optional exact state topic"></label>
+                <label>Active payload<input id="buttonStatePayload" placeholder="Payload that lights this key"></label>
+              </div>
+              <button type="button" id="clearButton" class="text-button">Clear key</button>
+            </fieldset>
+          </div>
+          <datalist id="groupSuggestions">
+            <option value="audio"></option>
+            <option value="lighting"></option>
+            <option value="shades"></option>
+            <option value="kvm"></option>
+          </datalist>
+
+          <div class="divider"></div>
+
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Embedded server</p>
+              <h2>Web API</h2>
+            </div>
+          </div>
+          <div class="grid">
+            <label>Listen address<input id="serverHost" required></label>
+            <label>Port<input id="serverPort" type="number" min="1" max="65535" required></label>
+          </div>
+          <p class="note">Keep the listen address on 127.0.0.1 and use an SSH tunnel. A non-loopback address exposes the unauthenticated operational API and requires a separate authenticated reverse proxy and firewall.</p>
+        </section>
+
+        <footer class="actions">
+          <p id="message" role="status"></p>
+          <button type="submit" class="secondary">Save</button>
+          <button type="button" id="saveRestart" class="primary">Save &amp; restart</button>
+        </footer>
+      </form>
+    </main>
+    <script src="/config/assets/app.js"></script>
+  </body>
+</html>

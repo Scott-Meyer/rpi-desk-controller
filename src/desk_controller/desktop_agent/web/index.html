@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="desk-agent-token" content="__DESK_AGENT_TOKEN__">
+    <title>Desk Agent — Button Editor</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Desktop agent</p>
+          <h1>Button editor</h1>
+          <p class="lede">
+            This computer can use any key that is not configured on the Pi.
+          </p>
+        </div>
+        <div class="connection">
+          <span id="connectionDot" class="connection-dot"></span>
+          <span id="connectionText">Connecting…</span>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <div class="deck-column">
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Physical controller</p>
+              <h2>Stream Deck</h2>
+            </div>
+            <button id="refreshButton" class="secondary compact" type="button">Refresh</button>
+          </div>
+          <p class="note">
+            Pi-owned buttons are locked here. Select any empty key to assign an
+            app or system action on this machine.
+          </p>
+          <div id="deckGrid" class="deck-grid" aria-label="Physical Stream Deck layout"></div>
+          <div id="layoutMessage" class="layout-message" role="status">
+            Waiting for the Pi to advertise its retained layout…
+          </div>
+          <div class="legend">
+            <span><i class="swatch computer"></i> Available to this computer</span>
+            <span><i class="swatch configured"></i> Configured here</span>
+            <span><i class="swatch locked"></i> Pi controlled</span>
+          </div>
+        </div>
+
+        <form id="buttonForm" class="editor">
+          <div id="emptyEditor" class="empty-editor">
+            <div class="empty-icon">↖</div>
+            <h2>Select an empty key</h2>
+            <p>Keys without a Pi action are automatically available here.</p>
+          </div>
+
+          <div id="editorFields" hidden>
+            <div class="editor-heading">
+              <div>
+                <p class="kicker">Computer slot <span id="slotId"></span></p>
+                <h2>Key <span id="keyNumber"></span></h2>
+              </div>
+              <label class="toggle">
+                <input id="configured" type="checkbox">
+                <span></span>
+                Assigned
+              </label>
+            </div>
+
+            <div id="assignmentFields">
+              <label>
+                Action
+                <select id="actionType">
+                  <option value="app">Open application</option>
+                  <option value="open">Open file or URL</option>
+                  <option value="hotkey">Send keyboard shortcut</option>
+                  <option value="audio_mute">Mute / unmute</option>
+                  <option value="media_play_pause">Play / pause media</option>
+                </select>
+              </label>
+
+              <div class="field-grid">
+                <label>
+                  Label
+                  <textarea id="label" rows="2" maxlength="128" placeholder="SLACK"></textarea>
+                </label>
+                <label>
+                  Icon
+                  <select id="icon">
+                    <option value="none">None</option>
+                    <option value="mute">Mute</option>
+                    <option value="play">Play</option>
+                    <option value="pause">Pause</option>
+                    <option value="link">Link</option>
+                    <option value="keyboard">Keyboard</option>
+                    <option value="speakers">Speakers</option>
+                    <option value="headphones">Headphones</option>
+                    <option value="wireless_headphones">Wireless headphones</option>
+                    <option value="earbuds">Earbuds</option>
+                  </select>
+                </label>
+              </div>
+
+              <label class="color-field">
+                Accent color
+                <span>
+                  <input id="accentColor" type="color" value="#50b4ff">
+                  <output id="accentColorValue">#50B4FF</output>
+                </span>
+              </label>
+
+              <div id="appFields">
+                <label>
+                  Application
+                  <input id="launchTarget" maxlength="2048" placeholder="Slack">
+                  <small>On macOS, use the app name from Applications.</small>
+                </label>
+                <label>
+                  Running process names
+                  <input id="processNames" placeholder="Slack, Slack.exe">
+                  <small>Used to light the key while the app is running.</small>
+                </label>
+              </div>
+
+              <div id="openFields" hidden>
+                <label>
+                  File or URL
+                  <input id="openTarget" maxlength="2048" placeholder="https://example.com or /path/to/file">
+                  <small>Opened by this computer's default application.</small>
+                </label>
+              </div>
+
+              <div id="hotkeyFields" hidden>
+                <label>
+                  Keyboard shortcut
+                  <input id="buttonShortcut" maxlength="128" placeholder="command+shift+k">
+                  <small>Requires keyboard-control permission on macOS.</small>
+                </label>
+              </div>
+
+              <div id="mediaHint" class="hint" hidden>
+                The button label and play/pause icon update from macOS Now Playing.
+              </div>
+              <div id="muteHint" class="hint" hidden>
+                The key lights while this computer's default audio output is muted.
+              </div>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section class="kvm-settings">
+        <div class="section-heading">
+          <div>
+            <p class="kicker">Distributed hardware</p>
+            <h2>KVM integration</h2>
+          </div>
+          <span class="settings-note">Configured only on this computer</span>
+        </div>
+        <p class="note">
+          Enable a local device only when its control connection is attached to
+          this computer. The Pi still coordinates every swap and rollback.
+        </p>
+
+        <div class="settings-grid">
+          <fieldset>
+            <legend>Global shortcut</legend>
+            <label class="setting-toggle">
+              <input id="hotkeyEnabled" type="checkbox">
+              Request a KVM swap from this computer
+            </label>
+            <label>
+              Shortcut
+              <input id="hotkeyShortcut" value="ctrl+option+command+k" placeholder="ctrl+option+command+k">
+              <small>Letters, digits, and F1–F12 are supported.</small>
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Monitor DDC</legend>
+            <label class="setting-toggle">
+              <input id="monitorControlEnabled" type="checkbox">
+              This computer can change the monitor input
+            </label>
+            <label>
+              Backend
+              <select id="monitorBackend">
+                <option value="auto">Automatic for this OS</option>
+                <option value="betterdisplay">BetterDisplay (macOS)</option>
+                <option value="windows_ddc">Windows DDC/CI</option>
+                <option value="ddcutil">ddcutil (Linux)</option>
+              </select>
+            </label>
+            <label>
+              Display name
+              <input id="monitorDisplayName" placeholder="Odyssey G75F">
+              <small>Optional. Used to select one physical display.</small>
+            </label>
+            <div class="field-grid">
+              <label>PC 1 input<input id="localPc1Input" value="0x0f"></label>
+              <label>PC 2 input<input id="localPc2Input" value="0x11"></label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>USB host switch</legend>
+            <label class="setting-toggle">
+              <input id="usbControlEnabled" type="checkbox">
+              The Acroname control connection is on this computer
+            </label>
+            <label>
+              Acroname serial number
+              <input id="localUsbSerial" placeholder="Optional, e.g. 0x12345678">
+              <small>Leave blank to auto-discover the attached controller.</small>
+            </label>
+          </fieldset>
+        </div>
+      </section>
+
+      <footer class="actions">
+        <p id="saveMessage" role="status">Changes apply immediately after saving.</p>
+        <button id="saveButton" class="primary" type="button" disabled>Save configuration</button>
+      </footer>
+    </main>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

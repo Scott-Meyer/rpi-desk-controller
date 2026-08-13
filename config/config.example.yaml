@@ -1,0 +1,110 @@
+server:
+  # Loopback is the secure default. Use an SSH tunnel to open the Pi UI.
+  # A non-loopback host exposes an unauthenticated operational API.
+  host: "127.0.0.1"
+  port: 8080
+
+homeassistant:
+  # Optional. Enable only after adding the URL and a long-lived access token.
+  enabled: false
+  url: "http://homeassistant.local:8123"
+  token: ""
+
+mqtt:
+  # "external" connects elsewhere. "local" uses Mosquitto hosted by this Pi.
+  mode: local
+  broker: "homeassistant.local"
+  port: 1883
+  username: ""
+  password: ""
+
+hardware:
+  simulate: false
+
+kvm:
+  # Each step can be controlled by: pi, active_workstation, pc1, or pc2.
+  monitor_controller: pi
+  usb_controller: pi
+  remote_timeout: 10
+
+usb_switch:
+  # "acroname" or "ugreen_cm691_gpio".
+  driver: acroname
+  # Used when the monitor input cannot be read. For a toggle-only UGREEN,
+  # this must also match the switch's illuminated host when the service starts.
+  default_channel: 0
+  # UGREEN CM691/25164 only: BCM pin driving an isolated momentary-contact
+  # relay wired in parallel with the included desktop controller's button.
+  gpio_pin: 17
+  gpio_active_high: false
+  gpio_pulse_ms: 200
+  # Optional but recommended for deterministic UGREEN targeting. Choose one
+  # always-connected USB device on the switch and enter its VID/PID.
+  observation_enabled: false
+  sentinel_vendor_id:       # e.g. 0x046d
+  sentinel_product_id:      # e.g. 0x0825
+  sentinel_serial_number:   # optional; use when VID/PID is not unique
+  observation_poll_interval: 2
+  observation_timeout: 8
+
+acroname:
+  serial_number: 0x00000000  # Replace with Acroname hub serial or auto-detect
+  default_channel: 0         # Legacy fallback; prefer usb_switch above
+
+monitors:
+  - display_id: 1
+    inputs:
+      pc1: "0x0f"  # DisplayPort 1
+      pc2: "0x11"  # HDMI 1
+
+streamdeck:
+  brightness: 70
+  # Laptop-bound actions show a dotted yellow border while they are retried.
+  pending_request_timeout: 300
+  pending_retry_interval: 5
+  buttons:
+    0:
+      enabled: true
+      label: "HOST\nPC"
+      icon: kvm
+      accent_color: [0, 200, 255]
+      group: kvm
+      action_type: kvm_toggle
+
+usb_hub:
+  telemetry_interval: 10
+  ports:
+    0: {name: "USB Port 0"}
+    1: {name: "USB Port 1"}
+    2: {name: "USB Port 2"}
+    3: {name: "USB Port 3"}
+    4: {name: "USB Port 4"}
+    5: {name: "USB Port 5"}
+    6: {name: "USB Port 6"}
+    7: {name: "USB Port 7"}
+
+workstations:
+  # Set these to the device IDs shown by the two workstation agents.
+  pc1: "computer-one"
+  pc2: "computer-two"
+
+workstation_slots: {}
+
+# Configure this only on a desktop agent. Enable local hardware when its
+# control connection is physically attached to that computer.
+desktop_kvm:
+  hotkey:
+    enabled: false
+    shortcut: "ctrl+option+command+k"
+  monitor:
+    enabled: false
+    backend: auto
+    display_name: ""
+    betterdisplay_path: "/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
+    display_id: 1
+    inputs:
+      pc1: "0x0f"
+      pc2: "0x11"
+  usb:
+    enabled: false
+    serial_number:

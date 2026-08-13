@@ -1,0 +1,22 @@
+# Configuration & secrets
+config/config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+wheelhouse/
+build/
+dist/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/

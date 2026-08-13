@@ -1,0 +1,3 @@
+# Raspberry Pi deployment dependencies.
+# Package metadata in pyproject.toml is the single source of truth.
+-e .[pi,acroname]

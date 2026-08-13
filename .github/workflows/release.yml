@@ -1,0 +1,121 @@
+name: Build & Release Desktop Agents
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          package_version="$(PYTHONPATH=src python -c 'from desk_controller import __version__; print(__version__)')"
+          test "v${package_version}" = "${GITHUB_REF_NAME}"
+
+      - name: Validate release source
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[pi,desktop,dev]"
+          ruff check .
+          ruff format --check .
+          bandit -q -r src -ll
+          python -m unittest discover -s tests
+
+  build-windows:
+    needs: validate-version
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Build Windows executable
+        shell: cmd
+        run: build_win.bat
+
+      - name: Upload Windows executable artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: DeskAgent-Windows
+          path: dist/DeskAgent-Windows.exe
+          if-no-files-found: error
+
+  build-macos:
+    needs: validate-version
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Build macOS disk image
+        run: ./build_mac.sh
+
+      - name: Upload macOS disk image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: DeskAgent-macOS
+          path: dist/DeskAgent-macOS.dmg
+          if-no-files-found: error
+
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: DeskAgent-Windows
+          path: dist/
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: DeskAgent-macOS
+          path: dist/
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum DeskAgent-Windows.exe DeskAgent-macOS.dmg > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          files: |
+            dist/DeskAgent-Windows.exe
+            dist/DeskAgent-macOS.dmg
+            dist/SHA256SUMS.txt
