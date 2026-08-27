@@ -4,11 +4,13 @@ All notable changes to this project will be documented here.
 
 ## 1.1.0 - 2026-08-26
 
+- Added customizable Desk Controller Name and Unique Device ID in Web UI and Home Assistant MQTT Auto-Discovery for seamless multi-desk / multi-Pi setups.
+- Added direct private LAN hosting for the Pi Web Configuration UI on port 8080 without requiring SSH tunnels.
+- Added in-browser GitHub Release Update Checker and one-click system update & restart buttons on the Raspberry Pi Web UI.
+- Added direct cross-link buttons between PC Desktop Agent Web UI and the connected Pi Desk Controller Web UI.
+- Added dynamic wildcard Stream Deck layout discovery and dynamic MQTT Client ID handling.
 - Added hard-stop handling on MQTT authentication and authorization failures to prevent reconnect flapping loops.
-- Added pre-save MQTT credential verification in native settings dialogs and web configuration editor.
-- Added live "Test Connection" button and real-time connection status feedback in settings popup and web UI.
-- Added web-based MQTT settings editor to view, test, and update broker credentials directly in the browser.
-- Improved desktop tray state indication and notifications for authentication errors.
+- Added pre-save MQTT credential verification and live "Test Connection" feedback in desktop settings and web UI.
 
 ## 1.0.0 - 2026-08-20
 
