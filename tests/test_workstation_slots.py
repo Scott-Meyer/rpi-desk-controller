@@ -384,8 +384,7 @@ class DesktopAgentSlotTests(unittest.TestCase):
         acknowledgements = [
             mqtt_call
             for mqtt_call in agent.mqtt.publish.call_args_list
-            if mqtt_call.args[0]
-            == "desk/workstation-b/deck/command_result"
+            if mqtt_call.args[0] == "desk/workstation-b/deck/command_result"
         ]
         self.assertEqual(len(acknowledgements), 2)
 

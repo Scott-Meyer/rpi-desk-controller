@@ -433,9 +433,7 @@ class StreamDeckManager:
         line_gap = 1
         for size in range(10, 5, -1):
             candidate = cls._font(size)
-            bounds = [
-                draw.textbbox((0, 0), line, font=candidate) for line in lines
-            ]
+            bounds = [draw.textbbox((0, 0), line, font=candidate) for line in lines]
             total_height = sum(bound[3] - bound[1] for bound in bounds)
             total_height += line_gap * max(0, len(lines) - 1)
             longest_bounds = draw.textbbox((0, 0), longest_line, font=candidate)
@@ -547,9 +545,7 @@ class StreamDeckManager:
             if icon_type == "sun":
                 self._draw_sun_icon(content_draw, cx, cy, 10, icon_color)
             elif icon_type == "moon":
-                self._draw_moon_icon(
-                    content_draw, cx, cy, 11, icon_color, bg_color
-                )
+                self._draw_moon_icon(content_draw, cx, cy, 11, icon_color, bg_color)
             elif icon_type == "bulb":
                 self._draw_bulb_icon(content_draw, cx, cy, 10, icon_color)
             elif icon_type == "speakers":

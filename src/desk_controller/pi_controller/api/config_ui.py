@@ -639,9 +639,7 @@ def _save_update(payload: PiConfigurationUpdate) -> Path:
         streamdeck["pending_request_timeout"] = (
             payload.streamdeck.pending_request_timeout
         )
-        streamdeck["pending_retry_interval"] = (
-            payload.streamdeck.pending_retry_interval
-        )
+        streamdeck["pending_retry_interval"] = payload.streamdeck.pending_retry_interval
         streamdeck["buttons"] = {
             button.key: button.model_dump(exclude={"key"})
             for button in payload.streamdeck.buttons

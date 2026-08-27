@@ -303,7 +303,9 @@ class KVMTransactionTests(unittest.TestCase):
             2026, 7, 28, 9, 5
         )
         controller = self.make_controller()
-        controller._update_sd_keys = DeskControllerApp._update_sd_keys.__get__(controller)
+        controller._update_sd_keys = DeskControllerApp._update_sd_keys.__get__(
+            controller
+        )
         controller.streamdeck = Mock()
         controller.current_pc = 0
         controller.kvm_fault = False

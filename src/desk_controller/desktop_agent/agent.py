@@ -310,9 +310,7 @@ class DesktopAgent:
                     result_payload,
                     qos=1,
                 ):
-                    logger.warning(
-                        "Failed publishing workstation slot acknowledgement"
-                    )
+                    logger.warning("Failed publishing workstation slot acknowledgement")
 
     def _execute_kvm_hardware_command(
         self,
@@ -691,9 +689,7 @@ class DesktopAgent:
                 except Exception as e:
                     logger.error(f"Error in agent main loop: {e}")
             poll_interval = (
-                self.ONLINE_POLL_INTERVAL
-                if connected
-                else self.OFFLINE_POLL_INTERVAL
+                self.ONLINE_POLL_INTERVAL if connected else self.OFFLINE_POLL_INTERVAL
             )
             wake_event.wait(poll_interval)
 

@@ -109,9 +109,7 @@ class DeskControllerApp:
         sd_brightness = self.config.get("streamdeck", {}).get("brightness", 85)
         streamdeck_conf = self.config.get("streamdeck", {})
         try:
-            pending_timeout = float(
-                streamdeck_conf.get("pending_request_timeout", 300)
-            )
+            pending_timeout = float(streamdeck_conf.get("pending_request_timeout", 300))
         except (TypeError, ValueError):
             pending_timeout = 300.0
         if not math.isfinite(pending_timeout) or pending_timeout <= 0:
@@ -122,10 +120,7 @@ class DeskControllerApp:
             )
         except (TypeError, ValueError):
             pending_retry_interval = 5.0
-        if (
-            not math.isfinite(pending_retry_interval)
-            or pending_retry_interval <= 0
-        ):
+        if not math.isfinite(pending_retry_interval) or pending_retry_interval <= 0:
             pending_retry_interval = 5.0
         self._pending_workstation_requests = PendingWorkstationRequests(
             timeout=pending_timeout,
@@ -714,9 +709,7 @@ class DeskControllerApp:
         workstation_deck = getattr(self, "workstation_deck", None)
         if workstation_deck is None:
             return False
-        return bool(
-            workstation_deck.selected_state(device_id).get("agent_online")
-        )
+        return bool(workstation_deck.selected_state(device_id).get("agent_online"))
 
     def _queue_workstation_request(
         self,
@@ -2043,9 +2036,7 @@ class DeskControllerApp:
                 is_available=is_available,
                 is_pending=is_pending,
                 display_style=(
-                    action_type
-                    if action_type in DYNAMIC_DATETIME_ACTIONS
-                    else "button"
+                    action_type if action_type in DYNAMIC_DATETIME_ACTIONS else "button"
                 ),
             )
 
