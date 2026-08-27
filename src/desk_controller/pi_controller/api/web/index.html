@@ -21,10 +21,25 @@
         <a class="tab active" href="?tab=connections" data-section="connections" aria-current="page">Connections</a>
         <a class="tab" href="?tab=hardware" data-section="hardware">Hardware</a>
         <a class="tab" href="?tab=controls" data-section="controls">Controls</a>
+        <a class="tab" href="?tab=system" data-section="system">System &amp; Updates</a>
       </nav>
 
       <form id="configForm">
         <section id="connections" class="panel active">
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Desk Identity</p>
+              <h2>Controller &amp; Home Assistant Name</h2>
+            </div>
+          </div>
+          <div class="grid">
+            <label>Controller name<input id="controllerName" placeholder="e.g. Sean's Desk Controller" required></label>
+            <label>Unique device ID<input id="controllerDeviceId" placeholder="e.g. sean_pi3_desk" required></label>
+          </div>
+          <p class="note">Identifies this desk controller in Home Assistant and across MQTT. Keep device ID unique for each Pi in your home.</p>
+
+          <div class="divider"></div>
+
           <div class="section-heading">
             <div>
               <p class="kicker">Message bus</p>
@@ -317,6 +332,36 @@
             <label>Port<input id="serverPort" type="number" min="1" max="65535" required></label>
           </div>
           <p class="note">Keep the listen address on 127.0.0.1 and use an SSH tunnel. A non-loopback address exposes the unauthenticated operational API and requires a separate authenticated reverse proxy and firewall.</p>
+        </section>
+
+        <section id="system" class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="kicker">Release management</p>
+              <h2>Version &amp; Updates</h2>
+            </div>
+            <span id="versionStatusBadge" class="status">Checking GitHub…</span>
+          </div>
+
+          <div id="systemVersionCard" class="connection-health checking" style="margin-top: 14px;">
+            <span class="health-dot" aria-hidden="true"></span>
+            <div>
+              <strong id="currentVersionText">Desk Controller Version</strong>
+              <span id="versionDetailText">Checking for updates from GitHub releases…</span>
+            </div>
+          </div>
+
+          <div id="releaseNotesBlock" class="note" style="margin-top: 16px; display: none; background: rgba(255,255,255,0.03); padding: 14px; border-radius: 8px; border: 1px solid var(--line);">
+            <strong style="color: var(--text);">Latest Release Notes:</strong>
+            <p id="releaseNotesText" style="margin-top: 6px; white-space: pre-wrap; font-size: 12px;"></p>
+          </div>
+
+          <div style="display: flex; gap: 12px; margin-top: 20px; align-items: center;">
+            <button type="button" id="checkUpdatesBtn" class="secondary">Check for Updates</button>
+            <button type="button" id="applyUpdateBtn" class="primary" style="display: none;">Update to Latest Release</button>
+            <button type="button" id="restartServiceBtn" class="secondary" style="margin-left: auto;">Restart Service</button>
+          </div>
+          <p id="updateMessage" class="note" style="margin-top: 12px;"></p>
         </section>
 
         <footer class="actions">

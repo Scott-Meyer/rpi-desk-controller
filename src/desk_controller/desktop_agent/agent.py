@@ -62,7 +62,7 @@ logger = logging.getLogger("DesktopAgent")
 
 
 class DesktopAgent:
-    STREAMDECK_LAYOUT_TOPIC = "desk/rpi_desk_controller/streamdeck/layout"
+    STREAMDECK_LAYOUT_TOPIC = "desk/+/streamdeck/layout"
     ONLINE_POLL_INTERVAL = 2.0
     OFFLINE_POLL_INTERVAL = 30.0
 
@@ -219,7 +219,7 @@ class DesktopAgent:
         """Fired instantly when an MQTT message arrives on subscribed topics."""
         logger.info(f"MQTT Message Received [{topic}]: {payload}")
 
-        if topic == self.STREAMDECK_LAYOUT_TOPIC:
+        if topic.endswith("/streamdeck/layout"):
             if not self._ingest_streamdeck_layout(payload):
                 logger.warning("Rejected invalid retained Stream Deck layout")
             return
@@ -431,11 +431,14 @@ class DesktopAgent:
                 button["slot_id"] = str(raw_button.get("slot_id", ""))[:64]
             filtered_buttons.append(button)
 
+        controller_url = str(body.get("controller_url", "")).strip() or None
+
         with self._layout_lock:
             self._streamdeck_layout = {
                 "rows": rows,
                 "columns": columns,
                 "buttons": filtered_buttons,
+                "controller_url": controller_url,
             }
             self._layout_received = True
         return True
@@ -449,15 +452,26 @@ class DesktopAgent:
         desktop_kvm = (
             kvm_hardware.settings if kvm_hardware is not None else DesktopKVMSettings()
         )
+        broker_host = getattr(self.mqtt, "broker", "homeassistant.local")
+        fallback_url = (
+            f"http://{broker_host}:8080/config"
+            if broker_host and broker_host not in {"127.0.0.1", "localhost", "::1"}
+            else "http://raspberrypi.local:8080/config"
+        )
+        pi_web_url = layout.get("controller_url") or fallback_url
+
         return {
             "device_id": self.device_id,
             "hostname": self.hostname,
             "mqtt_connected": self.mqtt.is_connected,
+            "mqtt_auth_failed": getattr(self.mqtt, "is_auth_failed", False),
+            "mqtt_auth_error": getattr(self.mqtt, "auth_error", None),
             "mqtt_health": self.mqtt.connection_health(),
             "pi_sync_pending": (
                 not self.mqtt.is_connected
                 or getattr(self, "_last_slot_manifest", None) is None
             ),
+            "pi_web_url": pi_web_url,
             "layout_received": layout_received,
             "layout": layout,
             "slots": self.workstation_buttons.configured_slots(),

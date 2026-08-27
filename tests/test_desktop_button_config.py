@@ -5,7 +5,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -130,6 +130,18 @@ class DesktopButtonConfigServerTests(unittest.TestCase):
     def make_agent(self):
         agent = Mock()
         agent.os_type = "darwin"
+        agent.mqtt = Mock()
+        agent.mqtt.is_connected = True
+        agent.mqtt.is_auth_failed = False
+        agent.mqtt.auth_error = None
+        agent.mqtt.connection_health.return_value = {
+            "connected": True,
+            "auth_failed": False,
+            "auth_error": None,
+            "disconnected_seconds": None,
+            "last_disconnect_reason": None,
+            "recovery_count": 0,
+        }
         agent.available_workstation_slot_ids.return_value = {"14", "15"}
         agent.button_configuration_snapshot.return_value = {
             "device_id": "workstation-b",
@@ -274,6 +286,26 @@ class DesktopButtonConfigServerTests(unittest.TestCase):
                 )
                 body = json.loads(urllib.request.urlopen(request, timeout=2).read())
                 self.assertEqual(body["device_id"], "workstation-b")
+
+                # Test GET /api/v1/mqtt
+                mqtt_req = urllib.request.Request(
+                    server.url + "api/v1/mqtt",
+                    headers={"X-Desk-Agent-Token": server.api_token},
+                )
+                mqtt_body = json.loads(urllib.request.urlopen(mqtt_req, timeout=2).read())
+                self.assertIn("broker", mqtt_body)
+                self.assertTrue(mqtt_body["connected"])
+
+                # Test POST /api/v1/mqtt/test
+                with patch("desk_controller.desktop_agent.config_server.test_mqtt_connection", return_value=(True, "Connected successfully!")):
+                    test_req = urllib.request.Request(
+                        server.url + "api/v1/mqtt/test",
+                        data=json.dumps({"broker": "localhost", "port": 1883}).encode("utf-8"),
+                        headers={"X-Desk-Agent-Token": server.api_token, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    test_res = json.loads(urllib.request.urlopen(test_req, timeout=2).read())
+                    self.assertTrue(test_res["success"])
             finally:
                 server.stop()
 

@@ -76,13 +76,36 @@ logger = logging.getLogger("MainController")
 
 class DeskControllerApp:
     DEVICE_ID = "rpi_desk_controller"
+    DEVICE_NAME = "Raspberry Pi Desk Controller"
     STREAMDECK_TOPIC = "desk/rpi_desk_controller/streamdeck"
     USB_HUB_TOPIC = "desk/rpi_desk_controller/usb_hub"
+
+    @property
+    def device_id(self) -> str:
+        return getattr(self, "_device_id", None) or self.DEVICE_ID
+
+    @device_id.setter
+    def device_id(self, val: str) -> None:
+        self._device_id = val
+
+    @property
+    def device_name(self) -> str:
+        return getattr(self, "_device_name", None) or self.DEVICE_NAME
+
+    @device_name.setter
+    def device_name(self, val: str) -> None:
+        self._device_name = val
 
     def __init__(self, config_path: Optional[str] = None):
         self.config_path = resolve_config_path(config_path)
         self.config = load_config(str(self.config_path))
         self._stop_event = threading.Event()
+
+        controller_conf = self.config.get("controller", {})
+        self.device_id = str(controller_conf.get("device_id") or self.DEVICE_ID).strip()
+        self.device_name = str(controller_conf.get("name") or self.DEVICE_NAME).strip()
+        self.STREAMDECK_TOPIC = f"desk/{self.device_id}/streamdeck"
+        self.USB_HUB_TOPIC = f"desk/{self.device_id}/usb_hub"
         acroname_conf = self.config.get("acroname", {})
         usb_switch_conf = self.config.get("usb_switch", {})
         monitors_conf = self.config.get("monitors", [{}])
@@ -178,7 +201,7 @@ class DeskControllerApp:
         password = mqtt_conf.get("password", "")
 
         self.mqtt = MQTTClientHelper(
-            client_id="rpi_desk_controller",
+            client_id=self.device_id,
             broker=broker_ip,
             port=port,
             username=username,
@@ -1209,11 +1232,11 @@ class DeskControllerApp:
         if not getattr(self, "homeassistant_enabled", True):
             return
         kvm_select_config = {
-            "name": "Desk KVM Active Host",
-            "unique_id": "desk_kvm_active_host_select",
-            "command_topic": "desk/kvm/set",
-            "state_topic": "desk/kvm/state",
-            "availability_topic": "desk/kvm/availability",
+            "name": f"{self.device_name} KVM Active Host",
+            "unique_id": f"{self.device_id}_kvm_active_host_select",
+            "command_topic": f"desk/{self.device_id}/kvm/set",
+            "state_topic": f"desk/{self.device_id}/kvm/state",
+            "availability_topic": f"desk/{self.device_id}/kvm/availability",
             "payload_available": "online",
             "payload_not_available": "offline",
             "options": ["PC1", "PC2"],
@@ -1221,7 +1244,7 @@ class DeskControllerApp:
             "device": self._controller_device_info(),
         }
         if not self.mqtt.publish(
-            "homeassistant/select/desk_kvm/config",
+            f"homeassistant/select/{self.device_id}_kvm/config",
             kvm_select_config,
             retain=True,
         ):
@@ -1234,9 +1257,9 @@ class DeskControllerApp:
 
     def _controller_device_info(self) -> Dict[str, Any]:
         return {
-            "identifiers": [self.DEVICE_ID],
-            "name": "Raspberry Pi Desk Controller",
-            "model": "RPi 4 KVM Controller",
+            "identifiers": [self.device_id],
+            "name": self.device_name,
+            "model": "RPi Smart Desk Controller",
             "manufacturer": "Antigravity Smart Desk",
             "sw_version": __version__,
             "configuration_url": self._configuration_url(),
@@ -1244,7 +1267,7 @@ class DeskControllerApp:
 
     def _usb_hub_device_info(self) -> Dict[str, Any]:
         return {
-            "identifiers": [f"{self.DEVICE_ID}_usb_hub"],
+            "identifiers": [f"{self.device_id}_usb_hub"],
             "name": getattr(
                 self.acroname,
                 "DISPLAY_NAME",
@@ -1256,7 +1279,7 @@ class DeskControllerApp:
                 "MANUFACTURER",
                 "Unknown",
             ),
-            "via_device": self.DEVICE_ID,
+            "via_device": self.device_id,
             "configuration_url": self._configuration_url(),
         }
 
@@ -1277,7 +1300,7 @@ class DeskControllerApp:
             self.mqtt.publish(
                 (
                     "homeassistant/device_automation/"
-                    f"{self.DEVICE_ID}/streamdeck_key_{key}/config"
+                    f"{self.device_id}/streamdeck_key_{key}/config"
                 ),
                 payload,
                 retain=True,
@@ -1292,8 +1315,15 @@ class DeskControllerApp:
         device = self._usb_hub_device_info()
 
         def publish(component: str, object_id: str, payload: Dict[str, Any]):
+            full_object_id = (
+                object_id
+                if object_id.startswith(f"{self.device_id}_")
+                else f"{self.device_id}_{object_id}"
+            )
+            payload["unique_id"] = full_object_id
+            payload["device"] = device
             self.mqtt.publish(
-                f"homeassistant/{component}/{object_id}/config",
+                f"homeassistant/{component}/{full_object_id}/config",
                 payload,
                 retain=True,
             )
@@ -1530,12 +1560,27 @@ class DeskControllerApp:
                     **button,
                 }
             )
+        server_conf = self.config.get("server", {})
+        port = server_conf.get("port", 8080)
+        lan_ip = getattr(self, "_lan_ip", None)
+        if not lan_ip:
+            broker = getattr(self.mqtt, "broker", None)
+            mqtt_port = getattr(self.mqtt, "port", None)
+            if isinstance(broker, str) and isinstance(mqtt_port, int):
+                try:
+                    lan_ip = get_lan_ip(broker, mqtt_port)
+                except Exception:
+                    lan_ip = None
+
+        controller_url = f"http://{lan_ip}:{port}/config" if lan_ip else f"http://localhost:{port}/config"
+
         self.mqtt.publish(
             f"{self.STREAMDECK_TOPIC}/layout",
             {
                 "rows": 3,
                 "columns": 5,
                 "buttons": buttons,
+                "controller_url": controller_url,
             },
             retain=True,
         )
@@ -2061,7 +2106,7 @@ class DeskControllerApp:
     def _start_api_server(self):
         """Start telemetry and configuration HTTP routes in the background."""
         server_conf = self.config.get("server", {})
-        host = server_conf.get("host", "127.0.0.1")
+        host = server_conf.get("host", "0.0.0.0")
         port = server_conf.get("port", 8080)
         if str(host).strip().lower() not in {
             "127.0.0.1",

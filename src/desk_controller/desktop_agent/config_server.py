@@ -14,7 +14,12 @@ from urllib.parse import urlsplit
 import yaml
 from pydantic import ValidationError
 
-from desk_controller.config import save_config
+from desk_controller.config import (
+    normalize_mqtt_config,
+    save_config,
+    save_mqtt_config,
+)
+from desk_controller.core.mqtt_client import test_mqtt_connection
 from desk_controller.desktop_agent.kvm_hardware import DesktopKVMSettings
 from desk_controller.desktop_agent.workstation_buttons import (
     DesktopWorkstationButtonRegistry,
@@ -174,6 +179,93 @@ class DesktopButtonConfigServer:
         self.agent.reconfigure_desktop_kvm(desktop_kvm.model_dump(mode="json"))
         return self.configuration()
 
+    def mqtt_configuration(self) -> Dict[str, Any]:
+        existing = _load_existing_config(self.config_path)
+        mqtt_conf = existing.get("mqtt", {})
+        health = self.agent.mqtt.connection_health() if self.agent and hasattr(self.agent, "mqtt") and callable(getattr(self.agent.mqtt, "connection_health", None)) else {}
+        if not isinstance(health, dict):
+            health = {}
+        auth_failed = getattr(self.agent.mqtt, "is_auth_failed", False) if self.agent and hasattr(self.agent, "mqtt") else False
+        if not isinstance(auth_failed, bool):
+            auth_failed = False
+        auth_error = getattr(self.agent.mqtt, "auth_error", None) if self.agent and hasattr(self.agent, "mqtt") else None
+        if not isinstance(auth_error, (str, type(None))):
+            auth_error = None
+        connected = getattr(self.agent.mqtt, "is_connected", False) if self.agent and hasattr(self.agent, "mqtt") else False
+        if not isinstance(connected, bool):
+            connected = False
+
+        return {
+            "broker": mqtt_conf.get("broker", "homeassistant.local"),
+            "port": int(mqtt_conf.get("port", 1883)),
+            "username": mqtt_conf.get("username", ""),
+            "password_configured": bool(mqtt_conf.get("password")),
+            "connected": connected,
+            "auth_failed": auth_failed,
+            "auth_error": auth_error,
+            "health": health,
+        }
+
+    def test_mqtt(self, payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ButtonConfigurationError("Request body must be a JSON object.")
+        broker = payload.get("broker", "")
+        port = payload.get("port", 1883)
+        username = payload.get("username", "")
+        password = payload.get("password")
+        if password is None:
+            existing = _load_existing_config(self.config_path)
+            password = existing.get("mqtt", {}).get("password", "")
+        success, message = test_mqtt_connection(
+            broker=broker,
+            port=port,
+            username=username,
+            password=password,
+            timeout=4.0,
+        )
+        return {"success": success, "message": message}
+
+    def update_mqtt_configuration(self, payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ButtonConfigurationError("Request body must be a JSON object.")
+        existing = _load_existing_config(self.config_path)
+        existing_mqtt = existing.get("mqtt", {})
+        password = payload.get("password")
+        if password is None:
+            password = existing_mqtt.get("password", "")
+        values = {
+            "broker": payload.get("broker", ""),
+            "port": payload.get("port", 1883),
+            "username": payload.get("username", ""),
+            "password": password,
+        }
+        try:
+            normalized = normalize_mqtt_config(values)
+        except ValueError as exc:
+            raise ButtonConfigurationError(str(exc))
+
+        success, message = test_mqtt_connection(
+            broker=normalized["broker"],
+            port=normalized["port"],
+            username=normalized.get("username"),
+            password=normalized.get("password"),
+            timeout=4.0,
+        )
+        if not success and "Authentication failed" in message:
+            raise ButtonConfigurationError(message, HTTPStatus.UNAUTHORIZED)
+
+        try:
+            saved_path = save_mqtt_config(normalized, self.config_path)
+        except (OSError, ValueError) as exc:
+            raise ButtonConfigurationError(
+                f"Could not save MQTT settings: {exc}",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            ) from exc
+
+        self.config_path = saved_path
+        self.agent.reconfigure_mqtt(normalized)
+        return self.mqtt_configuration()
+
     def _asset_text(self, filename: str) -> str:
         return (
             resources.files("desk_controller.desktop_agent")
@@ -282,8 +374,13 @@ class DesktopButtonConfigServer:
                             return
                         self._send_json(owner.configuration())
                         return
-                except (OSError, ButtonConfigurationError) as exc:
-                    logger.exception("Could not serve desktop button editor")
+                    if path == "/api/v1/mqtt":
+                        if not self._require_api_token():
+                            return
+                        self._send_json(owner.mqtt_configuration())
+                        return
+                except Exception as exc:
+                    logger.exception("Could not serve desktop configuration request")
                     self._send_json(
                         {"detail": str(exc)},
                         HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -294,8 +391,9 @@ class DesktopButtonConfigServer:
                     HTTPStatus.NOT_FOUND,
                 )
 
-            def do_PUT(self) -> None:
-                if urlsplit(self.path).path != "/api/v1/buttons":
+            def do_POST(self) -> None:
+                path = urlsplit(self.path).path
+                if path != "/api/v1/mqtt/test":
                     self._send_json(
                         {"detail": "Not found."},
                         HTTPStatus.NOT_FOUND,
@@ -318,7 +416,54 @@ class DesktopButtonConfigServer:
                     payload = json.loads(
                         self.rfile.read(content_length).decode("utf-8")
                     )
-                    result = owner.update_configuration(payload)
+                    result = owner.test_mqtt(payload)
+                except json.JSONDecodeError:
+                    self._send_json(
+                        {"detail": "Request body must be valid JSON."},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                except ButtonConfigurationError as exc:
+                    self._send_json({"detail": str(exc)}, exc.status)
+                    return
+                except Exception as exc:
+                    logger.exception("Could not test MQTT connection")
+                    self._send_json(
+                        {"detail": f"Could not test MQTT connection: {exc}"},
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    return
+                self._send_json(result)
+
+            def do_PUT(self) -> None:
+                path = urlsplit(self.path).path
+                if path not in {"/api/v1/buttons", "/api/v1/mqtt"}:
+                    self._send_json(
+                        {"detail": "Not found."},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                if not self._require_api_token():
+                    return
+
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
+                if not 0 < content_length <= MAX_REQUEST_BYTES:
+                    self._send_json(
+                        {"detail": "Invalid request size."},
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    )
+                    return
+                try:
+                    payload = json.loads(
+                        self.rfile.read(content_length).decode("utf-8")
+                    )
+                    if path == "/api/v1/mqtt":
+                        result = owner.update_mqtt_configuration(payload)
+                    else:
+                        result = owner.update_configuration(payload)
                 except json.JSONDecodeError:
                     self._send_json(
                         {"detail": "Request body must be valid JSON."},
@@ -329,9 +474,9 @@ class DesktopButtonConfigServer:
                     self._send_json({"detail": str(exc)}, exc.status)
                     return
                 except Exception:
-                    logger.exception("Could not update desktop buttons")
+                    logger.exception("Could not update desktop configuration")
                     self._send_json(
-                        {"detail": "Could not update desktop buttons."},
+                        {"detail": "Could not update desktop configuration."},
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                     )
                     return

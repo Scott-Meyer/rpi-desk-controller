@@ -498,6 +498,10 @@ byId("clearButton").addEventListener("click", () => {
 });
 
 function populate(config) {
+  if (config.controller) {
+    byId("controllerName").value = config.controller.name || "";
+    byId("controllerDeviceId").value = config.controller.device_id || "";
+  }
   byId("serverHost").value = config.server.host;
   byId("serverPort").value = config.server.port;
   byId("mqttMode").value = config.mqtt.mode;
@@ -584,6 +588,10 @@ function populate(config) {
 
 function payload() {
   return {
+    controller: {
+      name: byId("controllerName").value.trim() || "Raspberry Pi Desk Controller",
+      device_id: byId("controllerDeviceId").value.trim() || "rpi_desk_controller",
+    },
     server: {
       host: byId("serverHost").value,
       port: Number(byId("serverPort").value),
@@ -793,6 +801,132 @@ byId("usbPorts").addEventListener("click", (event) => {
   sendPortCommand(port, { action });
 });
 
+let latestReleaseTag = null;
+
+async function checkSystemVersion() {
+  const card = byId("systemVersionCard");
+  const currentVer = byId("currentVersionText");
+  const detailText = byId("versionDetailText");
+  const badge = byId("versionStatusBadge");
+  const notesBlock = byId("releaseNotesBlock");
+  const notesText = byId("releaseNotesText");
+  const applyBtn = byId("applyUpdateBtn");
+
+  if (!card) return;
+
+  try {
+    card.className = "connection-health checking";
+    badge.textContent = "Checking GitHub…";
+    detailText.textContent = "Checking GitHub Releases for updates…";
+
+    const response = await fetch("/api/v1/system/version", { cache: "no-store" });
+    if (!response.ok) throw new Error("Could not check version");
+    const data = await response.json();
+
+    currentVer.textContent = `Desk Controller ${data.current_version}`;
+    latestReleaseTag = data.latest_version;
+
+    if (data.update_available) {
+      card.className = "connection-health offline";
+      badge.className = "status error";
+      badge.textContent = `Update available (${data.latest_version})`;
+      detailText.textContent = `A newer release ${data.latest_version} is available on GitHub.`;
+      if (data.release_notes) {
+        notesBlock.style.display = "block";
+        notesText.textContent = data.release_notes;
+      }
+      applyBtn.style.display = "inline-block";
+      applyBtn.textContent = `Update to ${data.latest_version}`;
+    } else {
+      card.className = "connection-health online";
+      badge.className = "status success";
+      badge.textContent = "Up to date";
+      detailText.textContent = `You are running the latest version (${data.current_version}).`;
+      notesBlock.style.display = "none";
+      applyBtn.style.display = "none";
+    }
+  } catch (error) {
+    card.className = "connection-health offline";
+    badge.className = "status";
+    badge.textContent = "Check failed";
+    detailText.textContent = `Could not reach GitHub: ${error.message}`;
+  }
+}
+
+async function applySystemUpdate() {
+  const btn = byId("applyUpdateBtn");
+  const msg = byId("updateMessage");
+  btn.disabled = true;
+  msg.style.color = "var(--cyan)";
+  msg.textContent = `Fetching and applying ${latestReleaseTag || "latest release"}… Please wait.`;
+
+  try {
+    const response = await fetch("/api/v1/system/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_tag: latestReleaseTag }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Update failed");
+
+    msg.style.color = "var(--green)";
+    msg.textContent = `✓ ${data.message}. The controller service is restarting now. Reconnecting…`;
+
+    setTimeout(() => {
+      const pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch("/api/v1/config", { cache: "no-store" });
+          if (res.ok) {
+            clearInterval(pollInterval);
+            window.location.reload();
+          }
+        } catch {}
+      }, 2000);
+    }, 2000);
+  } catch (error) {
+    btn.disabled = false;
+    msg.style.color = "var(--danger)";
+    msg.textContent = `✗ ${error.message}`;
+  }
+}
+
+async function restartSystemService() {
+  const btn = byId("restartServiceBtn");
+  const msg = byId("updateMessage");
+  if (!confirm("Are you sure you want to restart the Desk Controller service?")) return;
+
+  btn.disabled = true;
+  msg.style.color = "var(--cyan)";
+  msg.textContent = "Restarting service…";
+
+  try {
+    const response = await fetch("/api/v1/system/restart", { method: "POST" });
+    if (!response.ok) throw new Error("Restart failed");
+    msg.style.color = "var(--green)";
+    msg.textContent = "Service is restarting… Reconnecting…";
+
+    setTimeout(() => {
+      const pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch("/api/v1/config", { cache: "no-store" });
+          if (res.ok) {
+            clearInterval(pollInterval);
+            window.location.reload();
+          }
+        } catch {}
+      }, 2000);
+    }, 2000);
+  } catch (error) {
+    btn.disabled = false;
+    msg.style.color = "var(--danger)";
+    msg.textContent = `✗ ${error.message}`;
+  }
+}
+
+byId("checkUpdatesBtn")?.addEventListener("click", checkSystemVersion);
+byId("applyUpdateBtn")?.addEventListener("click", applySystemUpdate);
+byId("restartServiceBtn")?.addEventListener("click", restartSystemService);
+
 fetch("/api/v1/config", { cache: "no-store" })
   .then(async (response) => {
     const data = await response.json();
@@ -800,6 +934,7 @@ fetch("/api/v1/config", { cache: "no-store" })
     populate(data);
     loadHub();
     loadConnectionStatus();
+    checkSystemVersion();
   })
   .catch((error) => {
     byId("connectionBadge").textContent = "Unavailable";

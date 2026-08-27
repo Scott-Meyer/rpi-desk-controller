@@ -32,7 +32,7 @@ class DesktopSettingsTests(unittest.TestCase):
             result = show_mqtt_settings(expected)
 
         self.assertEqual(result, expected)
-        windows_form.assert_called_once_with(expected)
+        windows_form.assert_called_once_with(expected, status_info=None)
 
     def test_tray_settings_are_saved_and_applied_without_restart(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -63,6 +63,8 @@ class DesktopSettingsTests(unittest.TestCase):
     def test_tray_connection_state_changes_icon_tooltip_and_menu(self):
         app = object.__new__(DeskAgentTrayApp)
         app.icon = Mock()
+        app.agent = Mock()
+        app.agent.mqtt = Mock(is_auth_failed=False)
         app._mqtt_connected = False
 
         app._on_connection_state_changed(True)
@@ -86,6 +88,18 @@ class DesktopSettingsTests(unittest.TestCase):
         self.assertNotEqual(
             create_tray_icon(False).getpixel((32, 4)),
             create_tray_icon(True).getpixel((32, 4)),
+        )
+
+        # Test auth failure state in tray
+        app.agent.mqtt.is_auth_failed = True
+        app._on_connection_state_changed(False)
+        self.assertEqual(
+            app._connection_menu_text(),
+            "● MQTT auth failed (bad credentials)",
+        )
+        self.assertEqual(
+            app.icon.title,
+            "Desk Agent — MQTT authentication failed",
         )
 
 

@@ -67,7 +67,7 @@ class DesktopAgentAudioTests(unittest.TestCase):
                     qos=1,
                 ),
                 unittest.mock.call(
-                    "desk/rpi_desk_controller/streamdeck/layout",
+                    "desk/+/streamdeck/layout",
                     qos=1,
                 ),
                 unittest.mock.call(

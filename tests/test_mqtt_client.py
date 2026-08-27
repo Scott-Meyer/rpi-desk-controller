@@ -325,11 +325,77 @@ class MQTTClientHelperTests(unittest.TestCase):
             health,
             {
                 "connected": False,
+                "auth_failed": False,
+                "auth_error": None,
                 "disconnected_seconds": 12.3,
                 "last_disconnect_reason": 7,
                 "recovery_count": 0,
             },
         )
+
+    def test_auth_failure_stops_loop_and_sets_auth_failed(self):
+        helper, client = self.make_helper()
+        helper.start()
+        # Simulate CONNACK rc=4 (bad user name or password)
+        helper._on_connect(client, None, {}, 4, None)
+
+        self.assertFalse(helper.is_connected)
+        self.assertTrue(helper.is_auth_failed)
+        self.assertIn("bad username or password", helper.auth_error)
+        self.assertEqual(client.disconnect_calls, 1)
+        self.assertEqual(client.loop_stop_calls, 1)
+
+        health = helper.connection_health()
+        self.assertTrue(health["auth_failed"])
+        self.assertIsNotNone(health["auth_error"])
+
+        # Recovery should NOT run when auth failed
+        self.assertFalse(helper.recover_if_stale())
+
+    def test_auth_failure_codes_handled(self):
+        for code in (4, 5, 134, 135, 138):
+            with self.subTest(code=code):
+                helper, client = self.make_helper()
+                helper.start()
+                helper._on_connect(client, None, {}, code, None)
+                self.assertTrue(helper.is_auth_failed)
+                self.assertFalse(helper.is_connected)
+
+    def test_test_mqtt_connection_function(self):
+        from desk_controller.core.mqtt_client import test_mqtt_connection
+
+        fake_client = FakeMQTTClient()
+        fake_client.loop_start = Mock(return_value=0)
+        fake_client.connect_async = Mock(return_value=0)
+
+        # Mock Client constructor and socket check
+        with (
+            patch("desk_controller.core.mqtt_client.mqtt.Client", return_value=fake_client),
+            patch("desk_controller.core.mqtt_client.socket.create_connection"),
+        ):
+            # Test empty broker validation
+            ok, msg = test_mqtt_connection(broker="", port=1883)
+            self.assertFalse(ok)
+
+            # Test successful connection
+            def trigger_success(b, p, keepalive):
+                fake_client.on_connect(fake_client, None, {}, 0)
+                return 0
+
+            fake_client.connect_async.side_effect = trigger_success
+            ok, msg = test_mqtt_connection(broker="127.0.0.1", port=1883, timeout=1.0)
+            self.assertTrue(ok)
+            self.assertIn("successfully", msg)
+
+            # Test auth failure
+            def trigger_auth_fail(b, p, keepalive):
+                fake_client.on_connect(fake_client, None, {}, 4)
+                return 0
+
+            fake_client.connect_async.side_effect = trigger_auth_fail
+            ok, msg = test_mqtt_connection(broker="127.0.0.1", port=1883, username="bad", password="pwd", timeout=1.0)
+            self.assertFalse(ok)
+            self.assertIn("bad username or password", msg)
 
 
 if __name__ == "__main__":

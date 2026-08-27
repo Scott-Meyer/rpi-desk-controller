@@ -19,7 +19,7 @@ from desk_controller.pi_controller.api.config_ui import (
     router as config_router,
 )
 
-app = FastAPI(title="Desk Controller MQTT Bridge API", version="1.0.0")
+app = FastAPI(title="Desk Controller MQTT Bridge API", version="1.1.0")
 app.include_router(config_router)
 
 _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")

@@ -17,9 +17,12 @@
             This computer can use any key that is not configured on the Pi.
           </p>
         </div>
-        <div class="connection">
-          <span id="connectionDot" class="connection-dot"></span>
-          <span id="connectionText">Connecting…</span>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <a id="openPiWebBtn" class="primary compact" style="text-decoration: none; display: none;" target="_blank" rel="noopener">Open Pi Desk Controller ↗</a>
+          <div class="connection">
+            <span id="connectionDot" class="connection-dot"></span>
+            <span id="connectionText">Connecting…</span>
+          </div>
         </div>
       </header>
 
@@ -214,6 +217,54 @@
               <small>Leave blank to auto-discover the attached controller.</small>
             </label>
           </fieldset>
+        </div>
+      </section>
+
+      <section id="mqtt" class="mqtt-section">
+        <div class="section-heading">
+          <div>
+            <p class="kicker">Connection & Credentials</p>
+            <h2>MQTT Settings</h2>
+          </div>
+          <span class="settings-note">Stored securely on this computer</span>
+        </div>
+        <p class="note">
+          Connect this desktop agent to your MQTT broker to communicate with the desk controller.
+        </p>
+
+        <div id="mqttStatusBar" class="mqtt-status-bar offline">
+          <span id="mqttStatusText">Checking connection…</span>
+        </div>
+
+        <div class="settings-grid" style="margin-top: 16px;">
+          <fieldset>
+            <legend>Broker</legend>
+            <label>
+              Broker Host
+              <input id="mqttBroker" placeholder="homeassistant.local">
+            </label>
+            <label>
+              Port
+              <input id="mqttPort" type="number" value="1883" min="1" max="65535">
+            </label>
+          </fieldset>
+          <fieldset>
+            <legend>Authentication</legend>
+            <label>
+              Username
+              <input id="mqttUsername" placeholder="desk-agent">
+            </label>
+            <label>
+              Password
+              <input id="mqttPassword" type="password" placeholder="Leave blank to keep existing password">
+            </label>
+          </fieldset>
+        </div>
+
+        <div class="mqtt-actions">
+          <button id="testMqttButton" class="secondary" type="button">Test Connection</button>
+          <button id="saveMqttButton" class="primary" type="button">Save MQTT Settings</button>
+          <span id="mqttSaveFeedback" style="font-size: 12px; margin-left: 8px;"></span>
         </div>
       </section>
 

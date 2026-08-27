@@ -1,7 +1,12 @@
+controller:
+  # Friendly name advertised to Home Assistant and unique identifier
+  name: "Raspberry Pi Desk Controller"
+  device_id: "rpi_desk_controller"
+
 server:
-  # Loopback is the secure default. Use an SSH tunnel to open the Pi UI.
-  # A non-loopback host exposes an unauthenticated operational API.
-  host: "127.0.0.1"
+  # 0.0.0.0 enables direct browser access from your private LAN.
+  # Private LAN subnet checks protect this endpoint from external WAN requests.
+  host: "0.0.0.0"
   port: 8080
 
 homeassistant:

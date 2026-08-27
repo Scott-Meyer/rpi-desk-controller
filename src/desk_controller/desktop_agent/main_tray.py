@@ -92,6 +92,8 @@ class DeskAgentTrayApp:
     def _connection_menu_text(self, item=None) -> str:
         if getattr(self, "_mqtt_connected", False):
             return "● MQTT connected"
+        if self.agent and getattr(self.agent.mqtt, "is_auth_failed", False):
+            return "● MQTT auth failed (bad credentials)"
         return "● MQTT offline — reconnecting"
 
     def _on_connection_state_changed(self, connected: bool) -> None:
@@ -100,22 +102,39 @@ class DeskAgentTrayApp:
         icon = getattr(self, "icon", None)
         if icon is None:
             return
+        is_auth_fail = bool(self.agent and getattr(self.agent.mqtt, "is_auth_failed", False))
         icon.icon = create_tray_icon(self._mqtt_connected)
-        icon.title = (
-            "Desk Agent — MQTT connected"
-            if self._mqtt_connected
-            else "Desk Agent — MQTT offline, reconnecting"
-        )
+        if self._mqtt_connected:
+            icon.title = "Desk Agent — MQTT connected"
+        elif is_auth_fail:
+            icon.title = "Desk Agent — MQTT authentication failed"
+            self._notify("MQTT authentication failed: bad username or password.")
+        else:
+            icon.title = "Desk Agent — MQTT offline, reconnecting"
         try:
             icon.update_menu()
         except Exception:
             logger.exception("Could not refresh tray connection status")
 
     def _edit_mqtt_settings(self, icon=None, item=None):
+        config_server = getattr(self, "config_server", None)
+        if config_server is not None:
+            try:
+                url = config_server.start()
+                webbrowser.open(f"{url}#mqtt")
+                return
+            except OSError as exc:
+                logger.warning("Could not open web editor for MQTT settings: %s", exc)
+
         current = load_config(
             str(self.config_path) if self.config_path.is_file() else None
         )["mqtt"]
-        settings = show_mqtt_settings(current)
+        status_info = {
+            "connected": bool(self.agent.mqtt.is_connected) if self.agent else False,
+            "auth_failed": getattr(self.agent.mqtt, "is_auth_failed", False) if self.agent else False,
+            "auth_error": getattr(self.agent.mqtt, "auth_error", None) if self.agent else None,
+        }
+        settings = show_mqtt_settings(current, status_info=status_info)
         if settings is None:
             return
 
@@ -127,7 +146,6 @@ class DeskAgentTrayApp:
             return
 
         self.config_path = saved_path
-        config_server = getattr(self, "config_server", None)
         if config_server is not None:
             config_server.update_config_path(saved_path)
         if self.agent.reconfigure_mqtt(settings):
@@ -269,10 +287,13 @@ class DeskAgentTrayApp:
 
     def run(self):
         pystray = _load_pystray()
-        if not config_exists():
-            self._edit_mqtt_settings()
-
         self.config_server.start()
+        if not config_exists():
+            try:
+                webbrowser.open(f"{self.config_server.url}#mqtt")
+            except Exception:
+                self._edit_mqtt_settings()
+
         agent_thread = threading.Thread(target=self.agent.run, daemon=True)
         agent_thread.start()
 

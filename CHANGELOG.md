@@ -2,7 +2,15 @@
 
 All notable changes to this project will be documented here.
 
-## 1.0.0 - Unreleased
+## 1.1.0 - 2026-08-26
+
+- Added hard-stop handling on MQTT authentication and authorization failures to prevent reconnect flapping loops.
+- Added pre-save MQTT credential verification in native settings dialogs and web configuration editor.
+- Added live "Test Connection" button and real-time connection status feedback in settings popup and web UI.
+- Added web-based MQTT settings editor to view, test, and update broker credentials directly in the browser.
+- Improved desktop tray state indication and notifications for authentication errors.
+
+## 1.0.0 - 2026-08-20
 
 - Added coordinated Raspberry Pi, monitor, and USB-switch KVM transactions.
 - Added Windows and macOS desktop agents with native audio control.

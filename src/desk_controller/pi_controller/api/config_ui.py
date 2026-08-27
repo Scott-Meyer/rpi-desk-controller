@@ -1,21 +1,28 @@
 """LAN-only configuration API for the Raspberry Pi controller."""
 
 import ipaddress
+import logging
 import re
+import subprocess
+import sys
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from desk_controller import __version__
 from desk_controller.config import load_config, save_config
+from desk_controller.desktop_agent.updater import GitHubReleaseUpdater
 from desk_controller.pi_controller.streamdeck_layout import (
     configured_streamdeck_buttons,
     configured_usb_ports,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -80,6 +87,27 @@ class HomeAssistantSettings(BaseModel):
                 "Home Assistant URL is required when the integration is enabled"
             )
         return self
+
+
+class ControllerIdentitySettings(BaseModel):
+    name: str = Field(default="Raspberry Pi Desk Controller", min_length=1, max_length=128)
+    device_id: str = Field(default="rpi_desk_controller", min_length=1, max_length=64)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("controller name is required")
+        return value
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device_id(cls, value: str) -> str:
+        value = value.strip().lower().replace(" ", "_")
+        if not _DEVICE_ID_PATTERN.fullmatch(value):
+            raise ValueError("device ID may only contain letters, numbers, dots, dashes, and underscores")
+        return value
 
 
 class ServerSettings(BaseModel):
@@ -351,6 +379,7 @@ class USBHubSettings(BaseModel):
 
 
 class PiConfigurationUpdate(BaseModel):
+    controller: Optional[ControllerIdentitySettings] = None
     server: ServerSettings
     mqtt: MQTTSettings
     homeassistant: HomeAssistantSettings
@@ -479,11 +508,16 @@ def _public_config() -> Dict:
     inputs = monitor.get("inputs", {})
     acroname = config.get("acroname", {})
     usb_switch = config.get("usb_switch", {})
+    controller = config.get("controller", {})
     buttons = configured_streamdeck_buttons(config)
     ports = configured_usb_ports(config)
     usb_hub = config.get("usb_hub", {})
 
     return {
+        "controller": {
+            "name": controller.get("name", "Raspberry Pi Desk Controller"),
+            "device_id": controller.get("device_id", "rpi_desk_controller"),
+        },
         "server": config.get("server", {}),
         "mqtt": {
             "mode": mqtt.get("mode", "external"),
@@ -584,6 +618,12 @@ def _save_update(payload: PiConfigurationUpdate) -> Path:
     path = _active_config_path()
     with _CONFIG_LOCK:
         config = load_config(str(path))
+
+        if payload.controller is not None:
+            config["controller"] = {
+                "name": payload.controller.name,
+                "device_id": payload.controller.device_id,
+            }
 
         config.setdefault("server", {}).update(payload.server.model_dump())
 
@@ -738,6 +778,114 @@ def update_configuration(payload: PiConfigurationUpdate):
     dependencies=[Depends(_require_same_origin)],
 )
 def restart_controller():
+    if _RESTART_CALLBACK is None:
+        raise HTTPException(status_code=503, detail="Restart is unavailable")
+    _RESTART_CALLBACK()
+    return {"status": "restarting"}
+
+
+class SystemUpdatePayload(BaseModel):
+    target_tag: Optional[str] = None
+
+
+def _perform_git_release_update(target_tag: Optional[str] = None) -> Tuple[bool, str]:
+    project_dir = Path(__file__).resolve().parents[3]
+    if not (project_dir / ".git").exists():
+        for p in Path(__file__).resolve().parents:
+            if (p / ".git").exists():
+                project_dir = p
+                break
+
+    if not (project_dir / ".git").exists():
+        return False, "This installation is not running from a Git repository."
+
+    try:
+        fetch_res = subprocess.run(
+            ["git", "fetch", "--tags"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if fetch_res.returncode != 0:
+            return False, f"git fetch failed: {fetch_res.stderr.strip()}"
+
+        if not target_tag:
+            info = GitHubReleaseUpdater.check_for_updates()
+            target_tag = info.get("latest_version")
+            if not target_tag:
+                return False, "Could not determine latest release version from GitHub."
+
+        target_tag = str(target_tag).strip()
+        if not re.match(r"^v?[0-9]+\.[0-9]+(\.[0-9]+)?.*$", target_tag):
+            return False, f"Invalid release version: {target_tag}"
+
+        checkout_res = subprocess.run(
+            ["git", "checkout", target_tag],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if checkout_res.returncode != 0:
+            return False, f"git checkout failed: {checkout_res.stderr.strip()}"
+
+        pip_res = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", f"{project_dir}[pi,acroname]"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if pip_res.returncode != 0:
+            return False, f"pip install failed: {pip_res.stderr.strip()}"
+
+        return True, f"Successfully updated to {target_tag}"
+    except Exception as exc:
+        logger.exception("Failed performing Git release update")
+        return False, f"Update failed: {exc}"
+
+
+@router.get(
+    "/api/v1/system/version",
+    dependencies=[Depends(_require_lan_request)],
+)
+def get_system_version():
+    info = GitHubReleaseUpdater.check_for_updates()
+    return {
+        "current_version": f"v{__version__}",
+        "latest_version": info.get("latest_version", f"v{__version__}"),
+        "update_available": bool(info.get("update_available", False)),
+        "release_notes": info.get("release_notes", ""),
+        "release_url": info.get("release_url", ""),
+    }
+
+
+@router.post(
+    "/api/v1/system/update",
+    dependencies=[Depends(_require_same_origin)],
+)
+def apply_system_update(payload: Optional[SystemUpdatePayload] = None):
+    target_tag = payload.target_tag if payload else None
+    success, message = _perform_git_release_update(target_tag=target_tag)
+    if not success:
+        raise HTTPException(status_code=500, detail=message)
+
+    if _RESTART_CALLBACK is not None:
+        threading.Timer(1.0, _RESTART_CALLBACK).start()
+
+    return {
+        "status": "updated",
+        "message": message,
+        "restart_scheduled": bool(_RESTART_CALLBACK is not None),
+    }
+
+
+@router.post(
+    "/api/v1/system/restart",
+    dependencies=[Depends(_require_same_origin)],
+)
+def restart_system_service():
     if _RESTART_CALLBACK is None:
         raise HTTPException(status_code=503, detail="Restart is unavailable")
     _RESTART_CALLBACK()

@@ -61,9 +61,29 @@ function normalizeLabel(label) {
 function updateConnection() {
   const connection = document.querySelector(".connection");
   const online = Boolean(state?.mqtt_connected);
+  const authFailed = Boolean(state?.mqtt_auth_failed);
+
   connection.classList.toggle("online", online);
+  connection.classList.toggle("auth-failed", authFailed && !online);
+
+  const statusBar = byId("mqttStatusBar");
+  const statusText = byId("mqttStatusText");
+
   if (online) {
     byId("connectionText").textContent = `${state.hostname} · MQTT connected`;
+    if (statusBar && statusText) {
+      statusBar.className = "mqtt-status-bar online";
+      statusText.textContent = "● Connected to MQTT broker";
+    }
+    return;
+  }
+  if (authFailed) {
+    const errorMsg = state?.mqtt_auth_error || "bad credentials";
+    byId("connectionText").textContent = `${state?.hostname || "Desk Agent"} · MQTT auth failed (${errorMsg})`;
+    if (statusBar && statusText) {
+      statusBar.className = "mqtt-status-bar auth-failed";
+      statusText.textContent = `● Authentication failed: ${errorMsg}. Please check username and password.`;
+    }
     return;
   }
   const health = state?.mqtt_health || {};
@@ -75,6 +95,10 @@ function updateConnection() {
     ? ` · recovery ${health.recovery_count}`
     : "";
   byId("connectionText").textContent = `${state?.hostname || "Desk Agent"} · MQTT offline${duration}${recoveries}`;
+  if (statusBar && statusText) {
+    statusBar.className = "mqtt-status-bar offline";
+    statusText.textContent = `● Offline${duration}. Retrying connection…`;
+  }
 }
 
 async function refreshConnectionStatus() {
@@ -91,9 +115,21 @@ async function refreshConnectionStatus() {
       ...(state || {}),
       hostname: body.hostname,
       mqtt_connected: body.mqtt_connected,
+      mqtt_auth_failed: body.mqtt_auth_failed,
+      mqtt_auth_error: body.mqtt_auth_error,
       mqtt_health: body.mqtt_health,
       pi_sync_pending: body.pi_sync_pending,
+      pi_web_url: body.pi_web_url,
     };
+    const piWebBtn = byId("openPiWebBtn");
+    if (piWebBtn) {
+      if (body.pi_web_url) {
+        piWebBtn.href = body.pi_web_url;
+        piWebBtn.style.display = "inline-flex";
+      } else {
+        piWebBtn.style.display = "none";
+      }
+    }
     updateConnection();
     if (saveWaitingForSync && !body.pi_sync_pending) {
       saveWaitingForSync = false;
@@ -490,7 +526,125 @@ window.addEventListener("beforeunload", (event) => {
   event.returnValue = "";
 });
 
+async function loadMqttConfiguration() {
+  try {
+    const response = await fetch("/api/v1/mqtt", {
+      headers: { "X-Desk-Agent-Token": token },
+      cache: "no-store",
+    });
+    if (!response.ok) return;
+    const body = await response.json();
+    byId("mqttBroker").value = body.broker || "homeassistant.local";
+    byId("mqttPort").value = body.port || 1883;
+    byId("mqttUsername").value = body.username || "";
+    byId("mqttPassword").value = "";
+    if (body.password_configured) {
+      byId("mqttPassword").placeholder = "●●●●●●●● (leave blank to keep)";
+    } else {
+      byId("mqttPassword").placeholder = "Optional password";
+    }
+  } catch {
+    // Ignore fetch errors during startup
+  }
+}
+
+async function testMqtt() {
+  const broker = byId("mqttBroker").value.trim();
+  const port = Number.parseInt(byId("mqttPort").value, 10);
+  const username = byId("mqttUsername").value.trim();
+  const password = byId("mqttPassword").value;
+  const feedback = byId("mqttSaveFeedback");
+  const testBtn = byId("testMqttButton");
+
+  if (!broker) {
+    feedback.style.color = "var(--danger)";
+    feedback.textContent = "Broker address is required.";
+    return;
+  }
+
+  testBtn.disabled = true;
+  feedback.style.color = "var(--cyan)";
+  feedback.textContent = "Testing connection to broker…";
+
+  try {
+    const payload = { broker, port, username };
+    if (password) payload.password = password;
+
+    const response = await fetch("/api/v1/mqtt/test", {
+      method: "POST",
+      headers: apiHeaders,
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    if (body.success) {
+      feedback.style.color = "var(--green)";
+      feedback.textContent = "✓ Connected successfully!";
+    } else {
+      feedback.style.color = "var(--danger)";
+      feedback.textContent = `✗ ${body.message || "Connection failed."}`;
+    }
+  } catch (error) {
+    feedback.style.color = "var(--danger)";
+    feedback.textContent = `✗ ${error.message}`;
+  } finally {
+    testBtn.disabled = false;
+  }
+}
+
+async function saveMqtt() {
+  const broker = byId("mqttBroker").value.trim();
+  const port = Number.parseInt(byId("mqttPort").value, 10);
+  const username = byId("mqttUsername").value.trim();
+  const password = byId("mqttPassword").value;
+  const feedback = byId("mqttSaveFeedback");
+  const saveBtn = byId("saveMqttButton");
+
+  if (!broker) {
+    feedback.style.color = "var(--danger)";
+    feedback.textContent = "Broker address is required.";
+    return;
+  }
+
+  saveBtn.disabled = true;
+  feedback.style.color = "var(--cyan)";
+  feedback.textContent = "Testing & saving credentials…";
+
+  try {
+    const payload = { broker, port, username };
+    if (password) payload.password = password;
+
+    const response = await fetch("/api/v1/mqtt", {
+      method: "PUT",
+      headers: apiHeaders,
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      feedback.style.color = "var(--danger)";
+      feedback.textContent = `✗ ${body.detail || "Could not save MQTT settings."}`;
+      return;
+    }
+    feedback.style.color = "var(--green)";
+    feedback.textContent = "✓ Saved & reconnected!";
+    await refreshConnectionStatus();
+  } catch (error) {
+    feedback.style.color = "var(--danger)";
+    feedback.textContent = `✗ ${error.message}`;
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+byId("testMqttButton").addEventListener("click", testMqtt);
+byId("saveMqttButton").addEventListener("click", saveMqtt);
+
 loadConfiguration();
+loadMqttConfiguration().then(() => {
+  if (window.location.hash === "#mqtt" || window.location.hash === "#mqttSection") {
+    byId("mqtt")?.scrollIntoView({ behavior: "smooth" });
+    byId("mqttBroker")?.focus();
+  }
+});
 window.setInterval(refreshConnectionStatus, 3000);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshConnectionStatus();

@@ -3,13 +3,124 @@
 import json
 import logging
 import math
+import secrets
+import socket
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import paho.mqtt.client as mqtt
 
 logger = logging.getLogger("MQTTClient")
+
+AUTH_FAILURE_CODES = {4, 5, 134, 135, 138}
+
+
+def _is_auth_failure_code(code: Any) -> bool:
+    try:
+        val = int(getattr(code, "value", code))
+        return val in AUTH_FAILURE_CODES
+    except (TypeError, ValueError):
+        return False
+
+
+def _format_auth_error(reason_code: Any) -> str:
+    val = int(getattr(reason_code, "value", reason_code))
+    if val in (4, 134):
+        return "Authentication failed: bad username or password"
+    if val in (5, 135):
+        return "Authentication failed: not authorized"
+    if val == 138:
+        return "Authentication failed: client is banned"
+    return f"Authentication failed (code {val})"
+
+
+def test_mqtt_connection(
+    broker: str,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    timeout: float = 4.0,
+) -> Tuple[bool, str]:
+    """Test MQTT connection and credentials against a broker synchronously with timeout."""
+    broker = str(broker).strip()
+    if not broker:
+        return False, "Broker address is required."
+    try:
+        port = int(port)
+        if not 1 <= port <= 65535:
+            return False, "Port must be between 1 and 65535."
+    except (TypeError, ValueError):
+        return False, "Port must be a valid integer."
+
+    # Fast TCP connectivity pre-check with strict timeout
+    try:
+        sock = socket.create_connection((broker, port), timeout=min(2.0, timeout))
+        sock.close()
+    except OSError as exc:
+        return False, f"Could not reach broker {broker}:{port} ({exc})"
+
+    test_client_id = f"test_conn_{secrets.token_hex(4)}"
+    if hasattr(mqtt, "CallbackAPIVersion"):
+        test_client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=test_client_id,
+        )
+    else:
+        test_client = mqtt.Client(client_id=test_client_id)
+
+    if username:
+        test_client.username_pw_set(username, password or "")
+
+    result_event = threading.Event()
+    result_holder: Dict[str, Any] = {
+        "success": False,
+        "message": f"Connection timed out after {int(timeout)} seconds.",
+    }
+
+    def on_connect_cb(client, userdata, *args, **kwargs):
+        reason_code = args[1] if len(args) >= 2 else (args[0] if args else 0)
+        rc_val = int(getattr(reason_code, "value", reason_code))
+        if rc_val == mqtt.MQTT_ERR_SUCCESS:
+            result_holder["success"] = True
+            result_holder["message"] = "Connected successfully!"
+        elif _is_auth_failure_code(rc_val):
+            result_holder["success"] = False
+            result_holder["message"] = _format_auth_error(rc_val)
+        else:
+            try:
+                err_str = mqtt.connack_string(rc_val)
+            except Exception:
+                err_str = f"code {rc_val}"
+            result_holder["success"] = False
+            result_holder["message"] = f"Connection refused: {err_str}"
+        result_event.set()
+
+    test_client.on_connect = on_connect_cb
+
+    try:
+        connect_rc = test_client.connect_async(broker, port, keepalive=10)
+        if connect_rc is not None and int(getattr(connect_rc, "value", connect_rc)) != mqtt.MQTT_ERR_SUCCESS:
+            return False, f"Could not initiate connection: code {connect_rc}"
+        test_client.loop_start()
+        signaled = result_event.wait(timeout=timeout)
+        if not signaled:
+            return False, f"Connection timed out after {int(timeout)} seconds."
+        return bool(result_holder["success"]), str(result_holder["message"])
+    except Exception as exc:
+        return False, f"Connection failed: {exc}"
+    finally:
+        def cleanup():
+            try:
+                test_client.disconnect()
+            except Exception:
+                pass
+            try:
+                test_client.loop_stop()
+            except Exception:
+                pass
+
+        threading.Thread(target=cleanup, daemon=True, name="mqtt-test-cleanup").start()
 
 
 class MQTTClientHelper:
@@ -58,6 +169,8 @@ class MQTTClientHelper:
         self.recovery_check_interval = float(recovery_check_interval)
 
         self._is_connected = False
+        self._auth_failed = False
+        self._auth_error: Optional[str] = None
         self._loop_started = False
         self._running = False
         self._stopping = False
@@ -146,31 +259,50 @@ class MQTTClientHelper:
         )
         return True
 
-    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+    def _on_connect(self, client, userdata, *callback_args):
         if client is not self.client:
             logger.debug("Ignoring connect callback from retired MQTT client")
             return
 
+        reason_code = callback_args[1] if len(callback_args) >= 2 else (callback_args[0] if callback_args else 0)
         if not self._operation_succeeded(reason_code):
             now = time.monotonic()
+            rc_val = self._result_code_value(reason_code)
+            is_auth_fail = _is_auth_failure_code(rc_val)
+            auth_msg = _format_auth_error(rc_val) if is_auth_fail else None
+
             with self._state_lock:
                 was_connected = self._is_connected
                 self._is_connected = False
                 if self._disconnected_since is None:
                     self._disconnected_since = now
-                self._last_disconnect_reason = self._result_code_value(reason_code)
+                self._last_disconnect_reason = rc_val
+                if is_auth_fail:
+                    self._auth_failed = True
+                    self._auth_error = auth_msg
                 self._connected_event.clear()
+
             logger.error(
-                "Failed to connect to MQTT broker with code %s",
-                self._result_code_value(reason_code),
+                "Failed to connect to MQTT broker with code %s%s",
+                rc_val,
+                f" ({auth_msg})" if is_auth_fail else "",
             )
-            if was_connected:
+
+            if is_auth_fail:
+                # Stop network loop and disconnect to prevent continuous reconnection flapping
+                self._shutdown_client(client, loop_started=True, disconnect=True)
+                self._loop_started = False
+                self._running = False
+
+            if was_connected or is_auth_fail:
                 self._notify_connection_state(False)
             return
 
         with self._state_lock:
             was_connected = self._is_connected
             self._is_connected = True
+            self._auth_failed = False
+            self._auth_error = None
             self._disconnected_since = None
             self._connected_event.set()
         logger.info(
@@ -242,6 +374,16 @@ class MQTTClientHelper:
         with self._state_lock:
             return self._is_connected
 
+    @property
+    def is_auth_failed(self) -> bool:
+        with self._state_lock:
+            return self._auth_failed
+
+    @property
+    def auth_error(self) -> Optional[str]:
+        with self._state_lock:
+            return self._auth_error
+
     def connection_health(self) -> Dict[str, Any]:
         """Return secret-free connection and recovery diagnostics."""
         now = time.monotonic()
@@ -253,6 +395,8 @@ class MQTTClientHelper:
             )
             return {
                 "connected": self._is_connected,
+                "auth_failed": self._auth_failed,
+                "auth_error": self._auth_error,
                 "disconnected_seconds": disconnected_seconds,
                 "last_disconnect_reason": self._last_disconnect_reason,
                 "recovery_count": self._recovery_count,
@@ -319,6 +463,8 @@ class MQTTClientHelper:
                 self.client = self._create_client()
             with self._state_lock:
                 self._is_connected = False
+                self._auth_failed = False
+                self._auth_error = None
                 self._disconnected_since = time.monotonic()
                 self._connected_event.clear()
 
@@ -347,6 +493,7 @@ class MQTTClientHelper:
                 self._running
                 and not self._stopping
                 and not self._is_connected
+                and not self._auth_failed
                 and disconnected_since is not None
                 and now - disconnected_since >= self.recovery_timeout
             )

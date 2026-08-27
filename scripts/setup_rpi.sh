@@ -128,8 +128,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable desk-controller.service
 sudo systemctl restart desk-controller.service
 echo "Desk Controller service is enabled and running."
-echo "Open the loopback-only configuration UI through an SSH tunnel:"
-echo "  ssh -L 8080:localhost:8080 $SERVICE_USER@<raspberry-pi-host>"
-echo "  http://localhost:8080/config"
+echo "Open the configuration UI from any browser on your private LAN:"
+echo "  http://<raspberry-pi-hostname>.local:8080/config"
 
 echo "=== RPi Setup Complete (log out and back in to apply group membership) ==="

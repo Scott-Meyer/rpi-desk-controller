@@ -90,6 +90,16 @@ h2 { margin-bottom: 0; font-size: 23px; letter-spacing: -.025em; }
 }
 .connection.online { color: var(--green); }
 
+.connection.auth-failed .connection-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px rgba(255, 119, 135, .15);
+}
+.connection.auth-failed {
+  color: var(--danger);
+  border-color: rgba(255, 119, 135, .3);
+  background: rgba(255, 119, 135, .05);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(500px, 1.22fr) minmax(330px, .78fr);
@@ -439,6 +449,36 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 
 .actions.success p { color: var(--green); }
 .actions.error p { color: var(--danger); }
+
+.mqtt-section {
+  margin-top: 40px;
+  padding: 30px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--panel);
+}
+.mqtt-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  font-size: 13px;
+  font-weight: 600;
+}
+.mqtt-status-bar.online { border-color: rgba(104, 228, 165, .3); color: var(--green); }
+.mqtt-status-bar.auth-failed { border-color: rgba(255, 119, 135, .4); color: var(--danger); }
+.mqtt-status-bar.offline { border-color: rgba(242, 180, 95, .3); color: var(--warning); }
+
+.mqtt-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
 
 @media (max-width: 880px) {
   .workspace { grid-template-columns: 1fr; }
