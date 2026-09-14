@@ -440,7 +440,9 @@ audio_devices: {}
     def test_get_system_version(self):
         from unittest.mock import patch
 
-        with patch("desk_controller.pi_controller.api.config_ui.GitHubReleaseUpdater.check_for_updates") as mock_check:
+        with patch(
+            "desk_controller.pi_controller.api.config_ui.GitHubReleaseUpdater.check_for_updates"
+        ) as mock_check:
             mock_check.return_value = {
                 "update_available": True,
                 "latest_version": "v1.2.0",
@@ -458,7 +460,9 @@ audio_devices: {}
         restart_mock = Mock()
         configure_config_ui(self.config_path, restart_callback=restart_mock)
 
-        with patch("desk_controller.pi_controller.api.config_ui._perform_git_release_update") as mock_update:
+        with patch(
+            "desk_controller.pi_controller.api.config_ui._perform_git_release_update"
+        ) as mock_update:
             mock_update.return_value = (True, "Successfully updated to v1.2.0")
             payload = SystemUpdatePayload(target_tag="v1.2.0")
             res = apply_system_update(payload)
@@ -469,7 +473,9 @@ audio_devices: {}
     def test_apply_system_update_failure_raises_500(self):
         from unittest.mock import patch
 
-        with patch("desk_controller.pi_controller.api.config_ui._perform_git_release_update") as mock_update:
+        with patch(
+            "desk_controller.pi_controller.api.config_ui._perform_git_release_update"
+        ) as mock_update:
             mock_update.return_value = (False, "git checkout failed: tag not found")
             payload = SystemUpdatePayload(target_tag="v99.0.0")
             with self.assertRaises(HTTPException) as raised:

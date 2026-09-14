@@ -134,7 +134,9 @@ def _show_windows_settings(
     status_color_var = tkinter.StringVar()
 
     if status_info and status_info.get("auth_failed"):
-        status_var.set(f"● {status_info.get('auth_error', 'Authentication failed (bad credentials)')}")
+        status_var.set(
+            f"● {status_info.get('auth_error', 'Authentication failed (bad credentials)')}"
+        )
         status_color_var.set("#d9383a")
     elif status_info and status_info.get("connected"):
         status_var.set("● Currently connected to MQTT broker")

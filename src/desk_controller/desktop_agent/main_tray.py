@@ -102,7 +102,9 @@ class DeskAgentTrayApp:
         icon = getattr(self, "icon", None)
         if icon is None:
             return
-        is_auth_fail = bool(self.agent and getattr(self.agent.mqtt, "is_auth_failed", False))
+        is_auth_fail = bool(
+            self.agent and getattr(self.agent.mqtt, "is_auth_failed", False)
+        )
         icon.icon = create_tray_icon(self._mqtt_connected)
         if self._mqtt_connected:
             icon.title = "Desk Agent — MQTT connected"
@@ -131,8 +133,12 @@ class DeskAgentTrayApp:
         )["mqtt"]
         status_info = {
             "connected": bool(self.agent.mqtt.is_connected) if self.agent else False,
-            "auth_failed": getattr(self.agent.mqtt, "is_auth_failed", False) if self.agent else False,
-            "auth_error": getattr(self.agent.mqtt, "auth_error", None) if self.agent else None,
+            "auth_failed": getattr(self.agent.mqtt, "is_auth_failed", False)
+            if self.agent
+            else False,
+            "auth_error": getattr(self.agent.mqtt, "auth_error", None)
+            if self.agent
+            else None,
         }
         settings = show_mqtt_settings(current, status_info=status_info)
         if settings is None:

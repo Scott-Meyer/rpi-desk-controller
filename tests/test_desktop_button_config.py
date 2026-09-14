@@ -292,19 +292,31 @@ class DesktopButtonConfigServerTests(unittest.TestCase):
                     server.url + "api/v1/mqtt",
                     headers={"X-Desk-Agent-Token": server.api_token},
                 )
-                mqtt_body = json.loads(urllib.request.urlopen(mqtt_req, timeout=2).read())
+                mqtt_body = json.loads(
+                    urllib.request.urlopen(mqtt_req, timeout=2).read()
+                )
                 self.assertIn("broker", mqtt_body)
                 self.assertTrue(mqtt_body["connected"])
 
                 # Test POST /api/v1/mqtt/test
-                with patch("desk_controller.desktop_agent.config_server.test_mqtt_connection", return_value=(True, "Connected successfully!")):
+                with patch(
+                    "desk_controller.desktop_agent.config_server.test_mqtt_connection",
+                    return_value=(True, "Connected successfully!"),
+                ):
                     test_req = urllib.request.Request(
                         server.url + "api/v1/mqtt/test",
-                        data=json.dumps({"broker": "localhost", "port": 1883}).encode("utf-8"),
-                        headers={"X-Desk-Agent-Token": server.api_token, "Content-Type": "application/json"},
+                        data=json.dumps({"broker": "localhost", "port": 1883}).encode(
+                            "utf-8"
+                        ),
+                        headers={
+                            "X-Desk-Agent-Token": server.api_token,
+                            "Content-Type": "application/json",
+                        },
                         method="POST",
                     )
-                    test_res = json.loads(urllib.request.urlopen(test_req, timeout=2).read())
+                    test_res = json.loads(
+                        urllib.request.urlopen(test_req, timeout=2).read()
+                    )
                     self.assertTrue(test_res["success"])
             finally:
                 server.stop()

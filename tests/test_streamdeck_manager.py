@@ -79,7 +79,9 @@ class StreamDeckManagerTests(unittest.TestCase):
         self.assertIsNotNone(top_half.getbbox())
         self.assertIsNotNone(bottom_half.getbbox())
         self.assertTrue(any(b > 150 for r, g, b in top_half.getdata()))
-        self.assertTrue(any(r > 200 and g > 200 and b > 200 for r, g, b in bottom_half.getdata()))
+        self.assertTrue(
+            any(r > 200 and g > 200 and b > 200 for r, g, b in bottom_half.getdata())
+        )
 
     def test_all_display_styles_reserve_fifteen_percent_at_every_edge(self):
         manager = StreamDeckManager()

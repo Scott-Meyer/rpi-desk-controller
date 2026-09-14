@@ -109,7 +109,9 @@ class ConfigLoadingTests(unittest.TestCase):
 
         self.assertEqual(
             path,
-            Path(r"C:\Users\Example\AppData\Roaming") / "DeskController" / "config.yaml",
+            Path(r"C:\Users\Example\AppData\Roaming")
+            / "DeskController"
+            / "config.yaml",
         )
 
     def test_updater_uses_package_version(self):

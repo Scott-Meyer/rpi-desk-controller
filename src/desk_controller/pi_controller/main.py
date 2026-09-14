@@ -1204,8 +1204,7 @@ class DeskControllerApp:
             elif observed_usb_pc is None:
                 target_pc = matching_pc
                 logger.info(
-                    "Monitor input 0x%02x maps to PC%s; using it as the "
-                    "startup host",
+                    "Monitor input 0x%02x maps to PC%s; using it as the startup host",
                     input_source,
                     target_pc + 1,
                 )
@@ -1651,7 +1650,11 @@ class DeskControllerApp:
                 except Exception:
                     lan_ip = None
 
-        controller_url = f"http://{lan_ip}:{port}/config" if lan_ip else f"http://localhost:{port}/config"
+        controller_url = (
+            f"http://{lan_ip}:{port}/config"
+            if lan_ip
+            else f"http://localhost:{port}/config"
+        )
 
         self.mqtt.publish(
             f"{self.STREAMDECK_TOPIC}/layout",

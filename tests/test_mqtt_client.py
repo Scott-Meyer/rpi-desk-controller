@@ -370,7 +370,9 @@ class MQTTClientHelperTests(unittest.TestCase):
 
         # Mock Client constructor and socket check
         with (
-            patch("desk_controller.core.mqtt_client.mqtt.Client", return_value=fake_client),
+            patch(
+                "desk_controller.core.mqtt_client.mqtt.Client", return_value=fake_client
+            ),
             patch("desk_controller.core.mqtt_client.socket.create_connection"),
         ):
             # Test empty broker validation
@@ -393,7 +395,13 @@ class MQTTClientHelperTests(unittest.TestCase):
                 return 0
 
             fake_client.connect_async.side_effect = trigger_auth_fail
-            ok, msg = test_mqtt_connection(broker="127.0.0.1", port=1883, username="bad", password="pwd", timeout=1.0)
+            ok, msg = test_mqtt_connection(
+                broker="127.0.0.1",
+                port=1883,
+                username="bad",
+                password="pwd",
+                timeout=1.0,
+            )
             self.assertFalse(ok)
             self.assertIn("bad username or password", msg)
 

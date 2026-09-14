@@ -182,16 +182,34 @@ class DesktopButtonConfigServer:
     def mqtt_configuration(self) -> Dict[str, Any]:
         existing = _load_existing_config(self.config_path)
         mqtt_conf = existing.get("mqtt", {})
-        health = self.agent.mqtt.connection_health() if self.agent and hasattr(self.agent, "mqtt") and callable(getattr(self.agent.mqtt, "connection_health", None)) else {}
+        health = (
+            self.agent.mqtt.connection_health()
+            if self.agent
+            and hasattr(self.agent, "mqtt")
+            and callable(getattr(self.agent.mqtt, "connection_health", None))
+            else {}
+        )
         if not isinstance(health, dict):
             health = {}
-        auth_failed = getattr(self.agent.mqtt, "is_auth_failed", False) if self.agent and hasattr(self.agent, "mqtt") else False
+        auth_failed = (
+            getattr(self.agent.mqtt, "is_auth_failed", False)
+            if self.agent and hasattr(self.agent, "mqtt")
+            else False
+        )
         if not isinstance(auth_failed, bool):
             auth_failed = False
-        auth_error = getattr(self.agent.mqtt, "auth_error", None) if self.agent and hasattr(self.agent, "mqtt") else None
+        auth_error = (
+            getattr(self.agent.mqtt, "auth_error", None)
+            if self.agent and hasattr(self.agent, "mqtt")
+            else None
+        )
         if not isinstance(auth_error, (str, type(None))):
             auth_error = None
-        connected = getattr(self.agent.mqtt, "is_connected", False) if self.agent and hasattr(self.agent, "mqtt") else False
+        connected = (
+            getattr(self.agent.mqtt, "is_connected", False)
+            if self.agent and hasattr(self.agent, "mqtt")
+            else False
+        )
         if not isinstance(connected, bool):
             connected = False
 

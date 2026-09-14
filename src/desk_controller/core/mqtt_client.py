@@ -100,7 +100,10 @@ def test_mqtt_connection(
 
     try:
         connect_rc = test_client.connect_async(broker, port, keepalive=10)
-        if connect_rc is not None and int(getattr(connect_rc, "value", connect_rc)) != mqtt.MQTT_ERR_SUCCESS:
+        if (
+            connect_rc is not None
+            and int(getattr(connect_rc, "value", connect_rc)) != mqtt.MQTT_ERR_SUCCESS
+        ):
             return False, f"Could not initiate connection: code {connect_rc}"
         test_client.loop_start()
         signaled = result_event.wait(timeout=timeout)
@@ -110,6 +113,7 @@ def test_mqtt_connection(
     except Exception as exc:
         return False, f"Connection failed: {exc}"
     finally:
+
         def cleanup():
             try:
                 test_client.disconnect()
@@ -264,7 +268,11 @@ class MQTTClientHelper:
             logger.debug("Ignoring connect callback from retired MQTT client")
             return
 
-        reason_code = callback_args[1] if len(callback_args) >= 2 else (callback_args[0] if callback_args else 0)
+        reason_code = (
+            callback_args[1]
+            if len(callback_args) >= 2
+            else (callback_args[0] if callback_args else 0)
+        )
         if not self._operation_succeeded(reason_code):
             now = time.monotonic()
             rc_val = self._result_code_value(reason_code)

@@ -90,7 +90,9 @@ class HomeAssistantSettings(BaseModel):
 
 
 class ControllerIdentitySettings(BaseModel):
-    name: str = Field(default="Raspberry Pi Desk Controller", min_length=1, max_length=128)
+    name: str = Field(
+        default="Raspberry Pi Desk Controller", min_length=1, max_length=128
+    )
     device_id: str = Field(default="rpi_desk_controller", min_length=1, max_length=64)
 
     @field_validator("name")
@@ -106,7 +108,9 @@ class ControllerIdentitySettings(BaseModel):
     def validate_device_id(cls, value: str) -> str:
         value = value.strip().lower().replace(" ", "_")
         if not _DEVICE_ID_PATTERN.fullmatch(value):
-            raise ValueError("device ID may only contain letters, numbers, dots, dashes, and underscores")
+            raise ValueError(
+                "device ID may only contain letters, numbers, dots, dashes, and underscores"
+            )
         return value
 
 
@@ -831,7 +835,14 @@ def _perform_git_release_update(target_tag: Optional[str] = None) -> Tuple[bool,
             return False, f"git checkout failed: {checkout_res.stderr.strip()}"
 
         pip_res = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-e", f"{project_dir}[pi,acroname]"],
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-e",
+                f"{project_dir}[pi,acroname]",
+            ],
             cwd=str(project_dir),
             capture_output=True,
             text=True,
