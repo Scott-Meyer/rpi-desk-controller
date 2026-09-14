@@ -120,6 +120,7 @@ class DeskControllerApp:
         self.monitor = MonitorDDCController(
             display_id=monitor_conf.get("display_id", 1),
             simulate=simulate_hardware,
+            use_alt_addressing=bool(monitor_conf.get("use_alt_addressing", False)),
         )
 
         ha_conf = self.config.get("homeassistant", {})
@@ -183,6 +184,7 @@ class DeskControllerApp:
         self.workstation_deck = SelectedWorkstationDeck(self.physical_buttons)
         self.buttons = self.workstation_deck.resolve(self._get_active_hostname())
         self.kvm_fault = False
+        self._kvm_switch_in_flight = False
         self.active_audio_device = ""
         self._audio_state_by_host: Dict[str, str] = {}
         self.active_groups: Dict[str, int] = {}
@@ -671,14 +673,32 @@ class DeskControllerApp:
         return bool(result and result.success)
 
     def _start_kvm_switch(self, target_pc: int) -> bool:
-        """Start a non-blocking switch when called from the MQTT network loop."""
+        """Start a non-blocking switch, giving immediate Stream Deck feedback.
+
+        Runs the transaction on a background thread so callers on the MQTT
+        network loop or the Stream Deck key-press thread never block on the
+        (up to remote_timeout-second) round trip to a workstation agent.
+        Repeated calls while a switch is already running are ignored rather
+        than queued, so rapid button mashing doesn't pile up serial delays.
+        """
         worker = getattr(self, "_kvm_worker", None)
         if worker is not None and worker.is_alive():
             logger.warning("Ignoring KVM request while a switch is already running")
             return False
+
+        def _run():
+            try:
+                self._switch_kvm(target_pc)
+            finally:
+                self._kvm_switch_in_flight = False
+                self._update_sd_keys()
+                self._publish_streamdeck_state()
+
+        self._kvm_switch_in_flight = True
+        self._update_sd_keys()
+        self._publish_streamdeck_state()
         self._kvm_worker = threading.Thread(
-            target=self._switch_kvm,
-            args=(target_pc,),
+            target=_run,
             name="kvm-transaction",
             daemon=True,
         )
@@ -1083,8 +1103,38 @@ class DeskControllerApp:
         except (TypeError, ValueError):
             return None
 
+    def _observed_usb_pc(self, usb_owner: str) -> Optional[int]:
+        """Best-effort direct hardware read of which PC currently owns USB.
+
+        This is the actual ground truth for "who has keyboard/mouse control
+        right now" - unlike the configured default channel, which only
+        reflects the last-known/assumed state and can silently lie after a
+        restart if reality has since diverged (e.g. someone switched inputs
+        by hand, or the service simply started with stale config).
+        """
+        if usb_owner != "pi":
+            return None
+        driver = getattr(self.acroname, "DRIVER", "acroname")
+        if driver == "ugreen_cm691_gpio":
+            sentinel = self._usb_sentinel_config()
+            if not sentinel.is_complete():
+                return None
+            return self._observed_usb_channel()
+        try:
+            status = self.acroname.get_hub_status(self.usb_ports)
+        except Exception:
+            logger.warning(
+                "Could not read USB hub upstream state at startup",
+                exc_info=True,
+            )
+            return None
+        observed = status.get("active_upstream")
+        return observed if observed in (0, 1) else None
+
     def _initialize_kvm_state(self) -> bool:
-        """Route USB to the host selected on an awake, readable monitor."""
+        """Detect the KVM's real hardware state at startup and track that,
+        instead of trusting the configured default channel, which can be
+        stale or simply wrong for the PC that's actually plugged in."""
         configured_pc = self.current_pc
         target_pc = configured_pc
         transaction_id = uuid4()
@@ -1097,15 +1147,32 @@ class DeskControllerApp:
             self.kvm_fault = True
             logger.error("KVM hardware ownership is not configured correctly")
             return False
+
+        # The USB hub can usually be read directly and instantly, with no
+        # dependency on a remote workstation agent being awake/reachable -
+        # so prefer it over the configured fallback as our starting guess.
+        observed_usb_pc = self._observed_usb_pc(usb_owner)
+        if observed_usb_pc is not None:
+            target_pc = observed_usb_pc
+            logger.info(
+                "USB hub reports upstream is already on PC%s; using it as "
+                "the startup host instead of the configured default",
+                target_pc + 1,
+            )
+
         input_source = self._kvm_monitor_get(
             monitor_owner,
             transaction_id,
         )
 
+        mismatch_detected = False
         if input_source is None:
             logger.info(
-                "Monitor input unavailable; using configured fallback host PC%s",
-                configured_pc + 1,
+                "Monitor input unavailable; using %s host PC%s",
+                "the observed USB state"
+                if observed_usb_pc is not None
+                else "configured fallback",
+                target_pc + 1,
             )
         else:
             monitors_cfg = self.config.get("monitors", [{}])
@@ -1127,16 +1194,31 @@ class DeskControllerApp:
             if matching_pc is None:
                 logger.warning(
                     "Monitor input 0x%02x does not map to a configured host; "
-                    "using fallback PC%s",
+                    "using %s host PC%s",
                     input_source,
-                    configured_pc + 1,
+                    "the observed USB state"
+                    if observed_usb_pc is not None
+                    else "fallback",
+                    target_pc + 1,
                 )
-            else:
+            elif observed_usb_pc is None:
                 target_pc = matching_pc
                 logger.info(
-                    "Monitor input 0x%02x maps to PC%s; using it as the startup host",
+                    "Monitor input 0x%02x maps to PC%s; using it as the "
+                    "startup host",
                     input_source,
                     target_pc + 1,
+                )
+            elif matching_pc != observed_usb_pc:
+                # USB (keyboard/mouse) is the more trustworthy signal of
+                # who's actually in control; keep it and just flag the
+                # disagreement rather than silently trusting the monitor.
+                mismatch_detected = True
+                logger.warning(
+                    "Monitor input maps to PC%s but the USB hub is already "
+                    "on PC%s; trusting USB and flagging a mismatch",
+                    matching_pc + 1,
+                    observed_usb_pc + 1,
                 )
 
         if not self._kvm_usb_set(usb_owner, target_pc, transaction_id):
@@ -1149,7 +1231,7 @@ class DeskControllerApp:
             return False
 
         self.current_pc = target_pc
-        self.kvm_fault = False
+        self.kvm_fault = mismatch_detected
         self._refresh_workstation_deck()
         return True
 
@@ -1191,22 +1273,19 @@ class DeskControllerApp:
             target_pc_index,
             transaction_id,
         ):
-            rollback_ok = self._kvm_usb_set(
-                usb_owner,
-                previous_pc,
-                transaction_id,
+            # Don't roll back the USB switch here: keyboard/mouse control is
+            # often more valuable to a guest than the video, and a monitor
+            # step commonly fails simply because the target owner's desktop
+            # agent isn't running (e.g. a visitor's laptop). Commit the USB
+            # switch and surface a visible warning instead of undoing it.
+            self.current_pc = target_pc_index
+            self._refresh_workstation_deck()
+            self._apply_active_audio_state()
+            self._set_kvm_fault(
+                f"USB switched to PC {target_pc_index + 1}, but the monitor did not "
+                "confirm the input change; it may still be showing the old input "
+                "(host software may not be running)"
             )
-            if rollback_ok:
-                message = (
-                    f"Monitor refused KVM switch to PC {target_pc_index + 1}; "
-                    f"USB hub rolled back to PC {previous_pc + 1}"
-                )
-            else:
-                message = (
-                    f"Monitor refused KVM switch to PC {target_pc_index + 1}, "
-                    f"and USB rollback to PC {previous_pc + 1} also failed"
-                )
-            self._set_kvm_fault(message)
             return False
 
         self.current_pc = target_pc_index
@@ -1924,7 +2003,11 @@ class DeskControllerApp:
 
         if action_type == "kvm_toggle":
             next_pc = 1 if self.current_pc == 0 else 0
-            action_succeeded = self._switch_kvm(next_pc)
+            # Non-blocking: give an instant pending-border acknowledgment on
+            # the Stream Deck and run the transaction in the background so a
+            # slow/unreachable remote agent can't make the physical button
+            # feel unresponsive or cause repeated presses to queue up.
+            action_succeeded = self._start_kvm_switch(next_pc)
 
         elif action_type == "audio_output":
             if self.kvm_fault:
@@ -2057,11 +2140,14 @@ class DeskControllerApp:
                     )
                 )
             elif action_type == "kvm_toggle":
-                label = (
-                    "KVM\nERROR"
-                    if self.kvm_fault
-                    else f"HOST\nPC {self.current_pc + 1}"
-                )
+                switch_in_flight = self._kvm_switch_in_flight
+                is_pending = is_pending or switch_in_flight
+                if switch_in_flight:
+                    label = "SWITCHING\n..."
+                elif self.kvm_fault:
+                    label = "KVM\nERROR"
+                else:
+                    label = f"HOST\nPC {self.current_pc + 1}"
                 active = self.kvm_fault
                 if self.kvm_fault:
                     color = (255, 60, 60)

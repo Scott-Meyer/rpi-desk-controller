@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented here.
 
+## 1.2.0 - 2026-09-14
+
+- Added Pi-native LG alt-input DDC/CI switching, using the manufacturer's
+  DDC2AB I2C side-channel address so KVM transactions actually move the
+  monitor instead of silently no-oping.
+- Added real hardware detection of the active USB host at startup so the
+  Pi no longer trusts a possibly-stale configured default and misreports
+  which PC currently has keyboard/mouse control.
+- Made the physical Stream Deck KVM toggle button non-blocking: presses now
+  give instant pending feedback and no longer queue up or feel unresponsive
+  while a switch is in flight.
+- Added BetterDisplay alt-addressing (`ddcAlt`/`inputSelectAlt`) support to
+  the macOS desktop agent's monitor controller.
+
 ## 1.1.0 - 2026-08-26
 
 - Added customizable Desk Controller Name and Unique Device ID in Web UI and Home Assistant MQTT Auto-Discovery for seamless multi-desk / multi-Pi setups.

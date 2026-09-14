@@ -70,6 +70,73 @@ class KVMTransactionTests(unittest.TestCase):
         controller._clock_display_minute = None
         return controller
 
+    def test_physical_kvm_key_press_is_nonblocking(self):
+        # Regression test: the physical key-press handler must never block
+        # on the KVM transaction directly. Doing so left the button visibly
+        # unresponsive and made rapid repeat presses queue up and execute
+        # serially with multi-second delays (each waiting on remote_timeout).
+        controller = self.make_controller()
+        controller._start_kvm_switch = Mock(return_value=True)
+        controller.workstation_deck = Mock()
+        controller.workstation_deck.selected_state.return_value = {
+            "agent_online": True,
+        }
+        controller.buttons = {
+            0: {
+                "enabled": True,
+                "action_type": "kvm_toggle",
+                "group": "kvm",
+            }
+        }
+
+        controller._handle_key_press(0)
+
+        controller._start_kvm_switch.assert_called_once_with(1)
+
+    def test_repeated_kvm_key_presses_do_not_queue_up(self):
+        # A switch already in flight must cause extra presses to be ignored,
+        # not queued, so mashing the button doesn't pile up serial delays.
+        controller = self.make_controller()
+        controller._kvm_worker = threading.Thread(target=lambda: None)
+        controller._kvm_worker.is_alive = Mock(return_value=True)
+        controller._switch_kvm = Mock()
+        controller.workstation_deck = Mock()
+        controller.workstation_deck.selected_state.return_value = {
+            "agent_online": True,
+        }
+        controller.buttons = {
+            0: {
+                "enabled": True,
+                "action_type": "kvm_toggle",
+                "group": "kvm",
+            }
+        }
+
+        controller._handle_key_press(0)
+        controller._handle_key_press(0)
+
+        controller._switch_kvm.assert_not_called()
+
+    def test_kvm_switch_pending_flag_is_set_immediately_and_cleared_after(self):
+        controller = self.make_controller()
+        controller.acroname.switch_upstream_channel.return_value = True
+        controller.monitor.set_input_source.return_value = True
+        seen_pending_during_switch = []
+
+        original_switch_kvm = DeskControllerApp._switch_kvm
+
+        def spy(self, target_pc):
+            seen_pending_during_switch.append(self._kvm_switch_in_flight)
+            return original_switch_kvm(self, target_pc)
+
+        with patch.object(DeskControllerApp, "_switch_kvm", spy):
+            worker = controller._start_kvm_switch(1)
+            self.assertTrue(worker)
+            controller._kvm_worker.join(timeout=2)
+
+        self.assertEqual(seen_pending_during_switch, [True])
+        self.assertFalse(controller._kvm_switch_in_flight)
+
     def test_disabled_home_assistant_skips_scene_actions_and_discovery(self):
         controller = self.make_controller()
         controller.homeassistant_enabled = False
@@ -432,18 +499,21 @@ class KVMTransactionTests(unittest.TestCase):
 
         controller.workstation_deck.ingest.assert_not_called()
 
-    def test_monitor_failure_rolls_back_usb_without_committing_state(self):
+    def test_monitor_failure_commits_usb_switch_and_flags_a_warning(self):
         controller = self.make_controller()
         controller.acroname.switch_upstream_channel.side_effect = [True, True]
         controller.monitor.set_input_source.return_value = False
 
         self.assertFalse(controller._switch_kvm(1))
 
-        self.assertEqual(controller.current_pc, 0)
+        # The USB switch (keyboard/mouse) is kept even when the monitor step
+        # fails to confirm, since that commonly just means the target's
+        # desktop agent isn't running (e.g. a visiting guest's laptop).
+        self.assertEqual(controller.current_pc, 1)
         self.assertTrue(controller.kvm_fault)
         self.assertEqual(
             controller.acroname.switch_upstream_channel.call_args_list,
-            [call(1), call(0)],
+            [call(1)],
         )
         self.assertNotIn(
             call("desk/kvm/state", "PC2", retain=True),
@@ -487,6 +557,46 @@ class KVMTransactionTests(unittest.TestCase):
         self.assertEqual(controller.current_pc, 0)
         self.assertTrue(controller.kvm_fault)
 
+    def test_startup_trusts_observed_usb_hardware_over_configured_default(self):
+        # Regression test: the default_channel config is only a guess made
+        # at first-time setup. A restart must never "lie" about which PC
+        # actually has keyboard/mouse control when the hub can be read
+        # directly - it should reflect hardware reality instead.
+        controller = self.make_controller()
+        controller.current_pc = 0  # configured default still says PC1
+        controller.acroname.get_hub_status.return_value = {"active_upstream": 1}
+        controller.monitor.get_input_source.return_value = 0x11
+        controller.acroname.switch_upstream_channel.return_value = True
+
+        self.assertTrue(controller._initialize_kvm_state())
+
+        self.assertEqual(controller.current_pc, 1)
+        self.assertFalse(controller.kvm_fault)
+
+    def test_startup_trusts_observed_usb_when_monitor_is_unreadable(self):
+        controller = self.make_controller()
+        controller.current_pc = 0
+        controller.acroname.get_hub_status.return_value = {"active_upstream": 1}
+        controller.monitor.get_input_source.return_value = None
+        controller.acroname.switch_upstream_channel.return_value = True
+
+        self.assertTrue(controller._initialize_kvm_state())
+
+        self.assertEqual(controller.current_pc, 1)
+        self.assertFalse(controller.kvm_fault)
+
+    def test_startup_flags_mismatch_between_usb_and_monitor_but_trusts_usb(self):
+        controller = self.make_controller()
+        controller.current_pc = 0
+        controller.acroname.get_hub_status.return_value = {"active_upstream": 1}
+        controller.monitor.get_input_source.return_value = 0x0F  # maps to PC1
+        controller.acroname.switch_upstream_channel.return_value = True
+
+        self.assertTrue(controller._initialize_kvm_state())
+
+        self.assertEqual(controller.current_pc, 1)
+        self.assertTrue(controller.kvm_fault)
+
     def test_usb_failure_does_not_touch_monitor_or_commit_state(self):
         controller = self.make_controller()
         controller.acroname.switch_upstream_channel.return_value = False
@@ -524,7 +634,9 @@ class KVMTransactionTests(unittest.TestCase):
         self.assertEqual(args[2:], ("monitor_set", 1))
         controller.monitor.set_input_source.assert_not_called()
 
-    def test_fixed_agent_can_control_usb_and_roll_it_back_on_monitor_failure(self):
+    def test_fixed_agent_can_control_usb_and_keeps_it_committed_on_monitor_failure(
+        self,
+    ):
         controller = self.make_controller()
         controller.config["kvm"] = {
             "monitor_controller": "pi",
@@ -532,31 +644,22 @@ class KVMTransactionTests(unittest.TestCase):
         }
         controller.monitor.set_input_source.return_value = False
         controller._execute_remote_kvm_step = Mock(
-            side_effect=[
-                KVMHardwareResult(
-                    transaction_id=uuid4(),
-                    command_id=uuid4(),
-                    operation="usb_set",
-                    success=True,
-                ),
-                KVMHardwareResult(
-                    transaction_id=uuid4(),
-                    command_id=uuid4(),
-                    operation="usb_set",
-                    success=True,
-                ),
-            ]
+            return_value=KVMHardwareResult(
+                transaction_id=uuid4(),
+                command_id=uuid4(),
+                operation="usb_set",
+                success=True,
+            ),
         )
 
         self.assertFalse(controller._switch_kvm(1))
 
         calls = controller._execute_remote_kvm_step.call_args_list
+        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].args[0], "mac-id")
         self.assertEqual(calls[0].args[2:], ("usb_set", 1))
-        self.assertEqual(calls[1].args[0], "mac-id")
-        self.assertEqual(calls[1].args[2:], ("usb_set", 0))
         controller.acroname.switch_upstream_channel.assert_not_called()
-        self.assertEqual(controller.current_pc, 0)
+        self.assertEqual(controller.current_pc, 1)
         self.assertTrue(controller.kvm_fault)
 
     def test_both_hardware_steps_can_be_owned_by_active_agent(self):
@@ -1080,6 +1183,69 @@ class HardwareDriverFailureTests(unittest.TestCase):
         monitor = MonitorDDCController()
 
         self.assertFalse(monitor.set_input_source("0x11"))
+
+    @patch(
+        "desk_controller.pi_controller.drivers.monitor_ddc.subprocess.run",
+    )
+    def test_alt_addressing_write_uses_lg_side_channel_without_noverify(self, run):
+        # Confirmed on hardware: a plain write to 0xF4 at the monitor's normal
+        # I2C address is silently accepted but has no effect. The write only
+        # actually reaches LG's alt-input controller over the undocumented
+        # DDC2AB side-channel at 0x50. Combining that flag with --noverify
+        # also confirmed broken: ddcutil reports "Both --verify and
+        # --noverify specified" while still exiting 0, so --noverify must
+        # never be added here.
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        monitor = MonitorDDCController(display_id=1, use_alt_addressing=True)
+
+        self.assertTrue(monitor.set_input_source("0x91"))
+
+        run.assert_called_once_with(
+            [
+                "ddcutil",
+                "--display",
+                "1",
+                "setvcp",
+                "f4",
+                "0x91",
+                "--i2c-source-addr",
+                "0x50",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    @patch(
+        "desk_controller.pi_controller.drivers.monitor_ddc.subprocess.run",
+    )
+    def test_alt_addressing_read_uses_lg_side_channel(self, run):
+        run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout="VCP F4 CNC xff xff x00 x06\n",
+            stderr="",
+        )
+        monitor = MonitorDDCController(display_id=1, use_alt_addressing=True)
+
+        # This monitor's alt-feature reply is an unparseable "CNC" format,
+        # so the read is expected to gracefully return None...
+        self.assertIsNone(monitor.get_input_source())
+        # ...but the command must still be issued over the side-channel.
+        run.assert_called_once_with(
+            [
+                "ddcutil",
+                "--display",
+                "1",
+                "getvcp",
+                "f4",
+                "--terse",
+                "--i2c-source-addr",
+                "0x50",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
 
 
 if __name__ == "__main__":

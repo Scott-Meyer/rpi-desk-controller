@@ -39,6 +39,7 @@ class DesktopMonitorKVMSettings(BaseModel):
         max_length=2048,
     )
     display_id: int = Field(default=1, ge=1, le=64)
+    use_alt_addressing: bool = False
     inputs: Dict[str, str] = Field(
         default_factory=lambda: {"pc1": "0x0f", "pc2": "0x11"}
     )
@@ -108,12 +109,20 @@ class BetterDisplayMonitorController:
         ]
         if self.settings.display_name:
             command.append(f"-name={self.settings.display_name}")
-        command.extend(
-            [
-                "-feature=ddc",
-                "-vcp=inputSelect",
-            ]
-        )
+        if self.settings.use_alt_addressing:
+            command.extend(
+                [
+                    "-feature=ddcAlt",
+                    "-vcp=inputSelectAlt",
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "-feature=ddc",
+                    "-vcp=inputSelect",
+                ]
+            )
         return command
 
     def get_input_source(self) -> Optional[int]:

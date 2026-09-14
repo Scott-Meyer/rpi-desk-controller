@@ -58,6 +58,10 @@ acroname:
 
 monitors:
   - display_id: 1
+    # Some LG monitors (e.g. UltraGear/OLED GX-series) ignore standard DDC
+    # input-select writes for their "LG Alt" input set and require VCP
+    # feature 0xF4 instead of the standard 0x60 to switch reliably.
+    use_alt_addressing: false
     inputs:
       pc1: "0x0f"  # DisplayPort 1
       pc2: "0x11"  # HDMI 1
@@ -107,6 +111,9 @@ desktop_kvm:
     display_name: ""
     betterdisplay_path: "/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
     display_id: 1
+    # Some LG monitors ignore standard DDC input-select writes and require
+    # BetterDisplay's alternate addressing (ddcAlt/inputSelectAlt) instead.
+    use_alt_addressing: false
     inputs:
       pc1: "0x0f"
       pc2: "0x11"
