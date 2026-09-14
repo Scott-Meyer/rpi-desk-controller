@@ -2195,7 +2195,8 @@ class DeskControllerApp:
     def _start_api_server(self):
         """Start telemetry and configuration HTTP routes in the background."""
         server_conf = self.config.get("server", {})
-        host = server_conf.get("host", "0.0.0.0")
+        # nosec B104: gated by the private-LAN subnet check just below.
+        host = server_conf.get("host", "0.0.0.0")  # nosec B104
         port = server_conf.get("port", 8080)
         if str(host).strip().lower() not in {
             "127.0.0.1",
