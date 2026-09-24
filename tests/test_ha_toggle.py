@@ -157,6 +157,28 @@ class HAToggleTests(TestCase):
             "cover.set_cover_position", "", button["service_data"]
         )
 
+    def test_cover_position_must_agree_with_final_motion_state(self):
+        button = {
+            "action_type": "ha_state_action",
+            "state_entity": "cover.office_1,cover.office_2",
+            "state_attribute": "current_position",
+            "active_state": "100",
+            "state_requirements": {"state": "open"},
+            "service": "cover.set_cover_position",
+            "service_data": {
+                "entity_id": ["cover.office_1", "cover.office_2"],
+                "position": 100,
+            },
+        }
+        ha = Mock()
+        ha.get_state.return_value = {
+            "state": "closed",
+            "attributes": {"current_position": 100},
+        }
+        self.assertEqual(read_toggle_state(button, ha), "inactive")
+        ha.get_state.return_value["state"] = "open"
+        self.assertEqual(read_toggle_state(button, ha), "active")
+
     def test_ac_preset_branch_follows_observed_fan_not_last_press(self):
         button = {
             "state_entity": "climate.air_conditioner_air_conditioner",

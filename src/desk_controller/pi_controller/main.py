@@ -199,6 +199,7 @@ class DeskControllerApp:
         self._ha_toggle_failures: set[int] = set()
         self._ha_toggle_lock = threading.RLock()
         self._last_ha_toggle_poll = 0.0
+        self._last_monitor_check = 0.0
         self._clock_display_minute: Optional[str] = None
 
         # Setup MQTT Client with HA credentials
@@ -2093,7 +2094,7 @@ class DeskControllerApp:
             self._ha_toggle_pending[group] = {
                 "key": key,
                 "target": "requesting",
-                "deadline": time.monotonic() + 45,
+                "deadline": time.monotonic() + (90 if "cover." in group else 30),
             }
             self._ha_toggle_failures.discard(key)
 
@@ -2529,9 +2530,20 @@ class DeskControllerApp:
             )
         if local_usb_ready:
             self._reconcile_kvm_state()
+        self._last_monitor_check = time.monotonic()
 
         try:
             while not self._stop_event.is_set():
+                if (
+                    getattr(self.acroname, "DRIVER", "") == "none"
+                    and self._resolve_kvm_controller("usb") == "pi"
+                    and self.kvm_fault
+                    and time.monotonic() - self._last_monitor_check >= 60
+                ):
+                    self._last_monitor_check = time.monotonic()
+                    # For monitor-routed USB this only reads the monitor; it
+                    # never dispatches a remote or physical USB switch.
+                    self._start_kvm_reconcile()
                 poll_interval = 2 if self._ha_toggle_pending else 10
                 if time.monotonic() - self._last_ha_toggle_poll >= poll_interval:
                     self._last_ha_toggle_poll = time.monotonic()
