@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image, ImageDraw
 
@@ -31,6 +31,14 @@ class FakePILHelper:
 
 
 class StreamDeckManagerTests(unittest.TestCase):
+    def test_layout_uses_connected_hardware_instead_of_fifteen_key_assumption(self):
+        manager = StreamDeckManager()
+        self.assertIsNone(manager.layout())
+        manager.deck = Mock()
+        manager.deck.key_layout.return_value = (2, 3)
+        manager.deck.key_count.return_value = 6
+        self.assertEqual(manager.layout(), (2, 3))
+
     def test_time_display_uses_the_safe_area_and_accent_pill(self):
         image = Image.new("RGB", (72, 72), color=(10, 10, 14))
         draw = ImageDraw.Draw(image)

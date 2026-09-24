@@ -872,6 +872,58 @@ class KVMTransactionTests(unittest.TestCase):
             {"percentage": 60},
         )
 
+    def test_stateful_ha_button_keeps_other_key_presses_responsive(self):
+        controller = self.make_controller()
+        controller._ha_toggle_states = {}
+        controller._ha_toggle_in_flight = set()
+        controller._ha_toggle_lock = threading.RLock()
+        controller._last_ha_toggle_poll = 0.0
+        controller._start_kvm_switch = Mock(return_value=True)
+        controller.buttons = {
+            0: {"enabled": True, "action_type": "kvm_toggle", "group": "kvm"},
+            1: {
+                "enabled": True,
+                "label": "OFFICE OPEN",
+                "active_label": "OFFICE CLOSED",
+                "action_type": "ha_toggle",
+                "state_entity": "cover.office_1,cover.office_2",
+                "active_state": "closed",
+                "inactive_state": "open",
+                "service": "cover.close_cover",
+                "off_service": "cover.open_cover",
+                "service_data": {"entity_id": ["cover.office_1", "cover.office_2"]},
+                "off_service_data": {"entity_id": ["cover.office_1", "cover.office_2"]},
+            },
+        }
+        started = threading.Event()
+        unblock = threading.Event()
+        finished = threading.Event()
+
+        def slow_state(_entity):
+            started.set()
+            unblock.wait(2)
+            return {"state": "open"}
+
+        controller.ha.get_state.side_effect = slow_state
+        controller.ha.call_service.return_value = True
+        controller._publish_streamdeck_state.side_effect = (
+            lambda: finished.set() if controller._ha_toggle_states.get(1) else None
+        )
+        try:
+            controller._handle_key_press(1)
+            self.assertTrue(started.wait(1))
+            controller._handle_key_press(0)
+            controller._start_kvm_switch.assert_called_once_with(1)
+            controller._handle_key_press(1)
+            self.assertEqual(controller.ha.get_state.call_count, 1)
+        finally:
+            unblock.set()
+        self.assertTrue(finished.wait(2))
+        controller.ha.call_service.assert_called_once_with(
+            "cover.close_cover", "", controller.buttons[1]["service_data"]
+        )
+        self.assertEqual(controller._ha_toggle_states[1], "inactive")
+
     def test_home_assistant_discovery_covers_every_physical_key(self):
         controller = self.make_controller()
         controller._lan_ip = "192.168.50.30"
@@ -883,9 +935,12 @@ class KVMTransactionTests(unittest.TestCase):
             for mqtt_call in controller.mqtt.publish.call_args_list
             if mqtt_call.args[0].startswith("homeassistant/device_automation/")
         ]
-        self.assertEqual(len(discovery_calls), 15)
-        self.assertEqual(discovery_calls[14].args[1]["payload"], "key_14")
-        self.assertTrue(discovery_calls[14].kwargs["retain"])
+        active_calls = [call for call in discovery_calls if call.args[1]]
+        self.assertEqual(len(active_calls), 15)
+        self.assertEqual(active_calls[14].args[1]["payload"], "key_14")
+        self.assertTrue(active_calls[14].kwargs["retain"])
+        # A smaller deck removes retained triggers from a previously larger one.
+        self.assertEqual(len(discovery_calls) - len(active_calls), 17)
 
     def test_home_assistant_discovery_exposes_rich_usb_controls(self):
         controller = self.make_controller()

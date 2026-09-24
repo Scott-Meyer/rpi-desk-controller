@@ -18,6 +18,14 @@ if [[ "$REMOTE_DIR" == *" "* || "$REMOTE_DIR" == *"'"* ]]; then
     exit 2
 fi
 
+# The Pi receives source files, not .git. Record the exact checkout used for
+# this rsync; if local files differ from HEAD, never claim a clean revision.
+SOURCE_COMMIT="$(git -C "$PROJECT_DIR" rev-parse --verify HEAD)"
+SOURCE_DIRTY=0
+if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=normal -- README.md LICENSE THIRD_PARTY_NOTICES.md config/config.example.yaml src scripts systemd pyproject.toml requirements.txt)" ]]; then
+    SOURCE_DIRTY=1
+fi
+
 echo "=== Creating remote directory on $RPI_TARGET ==="
 # REMOTE_DIR is deliberately expanded locally and single-quoted for the remote shell.
 # shellcheck disable=SC2029
@@ -44,12 +52,29 @@ echo "=== Syncing application sources to $RPI_TARGET:$REMOTE_DIR ==="
 echo "=== Installing the package and restarting the service ==="
 # REMOTE_DIR is deliberately expanded locally and single-quoted for the remote shell.
 # shellcheck disable=SC2029
-ssh "$RPI_TARGET" "bash -s -- '$REMOTE_DIR'" <<'REMOTE_SCRIPT'
+ssh "$RPI_TARGET" "bash -s -- '$REMOTE_DIR' '$SOURCE_COMMIT' '$SOURCE_DIRTY'" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 remote_dir="$1"
+source_commit="$2"
+source_dirty="$3"
 cd "$remote_dir"
 remote_dir="$(pwd)"
+
+# Atomically stamp the files just transferred. The import-time reader keeps
+# the old identity until the new process starts after this write.
+python3 - "$source_commit" "$source_dirty" <<'STAMP_SCRIPT'
+import json
+import os
+import sys
+from pathlib import Path
+
+commit, dirty = sys.argv[1:]
+path = Path("src/desk_controller/_source_version.json")
+tmp = path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps({"commit": commit, "dirty": dirty == "1"}) + "\n")
+os.replace(tmp, path)
+STAMP_SCRIPT
 
 if [[ ! -x venv/bin/python ]]; then
     python3 -m venv venv

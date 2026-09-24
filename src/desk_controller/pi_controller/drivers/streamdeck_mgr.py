@@ -53,6 +53,15 @@ class StreamDeckManager:
         )
         return True
 
+    def layout(self) -> tuple[int, int] | None:
+        """Return the attached deck's (rows, columns), or None when undetected."""
+        if self.deck is None:
+            return None
+        rows, columns = self.deck.key_layout()
+        if rows <= 0 or columns <= 0 or rows * columns != self.deck.key_count():
+            raise ValueError("Stream Deck reported an inconsistent physical layout")
+        return rows, columns
+
     def _on_key_change(self, deck, key: int, state: bool):
         """Internal callback fired on key press / release."""
         if state and self.key_callback:

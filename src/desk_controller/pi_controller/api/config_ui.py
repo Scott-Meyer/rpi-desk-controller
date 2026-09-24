@@ -3,8 +3,6 @@
 import ipaddress
 import logging
 import re
-import subprocess
-import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
@@ -14,9 +12,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from desk_controller import __version__
+from desk_controller import __version__, source_version
 from desk_controller.config import load_config, save_config
 from desk_controller.desktop_agent.updater import GitHubReleaseUpdater
+from desk_controller.pi_controller.ha_toggle import toggle_targets_observed
 from desk_controller.pi_controller.streamdeck_layout import (
     configured_streamdeck_buttons,
     configured_usb_ports,
@@ -30,6 +29,7 @@ _CONFIG_LOCK = threading.RLock()
 _CONFIG_PATH: Optional[Path] = None
 _RESTART_CALLBACK: Optional[Callable[[], None]] = None
 _CONNECTION_STATUS_PROVIDER: Optional[Callable[[], Dict[str, Any]]] = None
+_STREAMDECK_LAYOUT_PROVIDER: Optional[Callable[[], Optional[Tuple[int, int]]]] = None
 _WEB_ROOT = Path(__file__).with_name("web")
 _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _INPUT_PATTERN = re.compile(r"^(?:0x)?[0-9A-Fa-f]{1,2}$")
@@ -251,7 +251,7 @@ class WorkstationSettings(BaseModel):
 
 
 class StreamDeckButtonSettings(BaseModel):
-    key: int = Field(ge=0, le=14)
+    key: int = Field(ge=0, le=31)
     enabled: bool = True
     label: str = Field(default="", max_length=128)
     icon: str = Field(default="headphones", max_length=64)
@@ -269,6 +269,7 @@ class StreamDeckButtonSettings(BaseModel):
         "audio_output",
         "ha_scene",
         "ha_service",
+        "ha_toggle",
         "mqtt",
         "workstation_slot",
     ] = "none"
@@ -281,6 +282,13 @@ class StreamDeckButtonSettings(BaseModel):
     state_payload: str = Field(default="", max_length=4096)
     service: str = Field(default="", max_length=128)
     service_data: Dict[str, Any] = Field(default_factory=dict)
+    off_service: str = Field(default="", max_length=128)
+    off_service_data: Dict[str, Any] = Field(default_factory=dict)
+    state_entity: str = Field(default="", max_length=1024)
+    state_attribute: str = Field(default="", max_length=128)
+    active_state: str = Field(default="", max_length=128)
+    inactive_state: str = Field(default="", max_length=128)
+    active_label: str = Field(default="", max_length=128)
 
     @field_validator("accent_color")
     @classmethod
@@ -299,6 +307,12 @@ class StreamDeckButtonSettings(BaseModel):
         "state_topic",
         "slot_id",
         "service",
+        "off_service",
+        "state_entity",
+        "state_attribute",
+        "active_state",
+        "inactive_state",
+        "active_label",
     )
     @classmethod
     def strip_text(cls, value: str) -> str:
@@ -319,12 +333,32 @@ class StreamDeckButtonSettings(BaseModel):
             raise ValueError("audio buttons require an output-device target")
         if self.action_type == "ha_scene" and not self.target.startswith("scene."):
             raise ValueError("Home Assistant scene targets must start with scene.")
-        if self.action_type == "ha_service":
-            parts = self.service.split(".")
-            if len(parts) != 2 or not all(
-                re.fullmatch(r"[a-z0-9_]+", part) for part in parts
+        if self.action_type in {"ha_service", "ha_toggle"}:
+            for service in (
+                (self.service, self.off_service)
+                if self.action_type == "ha_toggle"
+                else (self.service,)
             ):
-                raise ValueError("Home Assistant services must use domain.service")
+                parts = service.split(".")
+                if len(parts) != 2 or not all(
+                    re.fullmatch(r"[a-z0-9_]+", part) for part in parts
+                ):
+                    raise ValueError("Home Assistant services must use domain.service")
+        if self.action_type == "ha_toggle":
+            entities = [item.strip() for item in self.state_entity.split(",")]
+            if (
+                not self.active_state
+                or not entities
+                or not all(
+                    re.fullmatch(r"[a-z0-9_]+\.[a-z0-9_]+", item) for item in entities
+                )
+            ):
+                raise ValueError("HA toggle requires state entities and active state")
+            if not toggle_targets_observed(self.model_dump()):
+                raise ValueError(
+                    "HA toggle actions must target exactly the observed entities, "
+                    "or provide explicit MQTT topic and payload"
+                )
         if self.action_type == "mqtt" and not self.mqtt_topic:
             raise ValueError("MQTT buttons require a publish topic")
         if self.action_type == "workstation_slot":
@@ -346,7 +380,7 @@ class StreamDeckSettings(BaseModel):
     pending_retry_interval: int = Field(default=5, ge=1, le=3600)
     buttons: List[StreamDeckButtonSettings] = Field(
         default_factory=list,
-        max_length=15,
+        max_length=32,
     )
 
     @model_validator(mode="after")
@@ -401,12 +435,17 @@ def configure_config_ui(
     config_path: Path,
     restart_callback: Optional[Callable[[], None]] = None,
     connection_status_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+    streamdeck_layout_provider: Optional[
+        Callable[[], Optional[Tuple[int, int]]]
+    ] = None,
 ) -> None:
     """Connect the web editor to the controller's active config file."""
     global _CONFIG_PATH, _RESTART_CALLBACK, _CONNECTION_STATUS_PROVIDER
+    global _STREAMDECK_LAYOUT_PROVIDER
     _CONFIG_PATH = Path(config_path)
     _RESTART_CALLBACK = restart_callback
     _CONNECTION_STATUS_PROVIDER = connection_status_provider
+    _STREAMDECK_LAYOUT_PROVIDER = streamdeck_layout_provider
 
 
 def _canonical_host(value: str) -> str:
@@ -516,6 +555,8 @@ def _public_config() -> Dict:
     buttons = configured_streamdeck_buttons(config)
     ports = configured_usb_ports(config)
     usb_hub = config.get("usb_hub", {})
+    layout = _STREAMDECK_LAYOUT_PROVIDER() if _STREAMDECK_LAYOUT_PROVIDER else None
+    rows, columns = layout if layout else (3, 5)
 
     return {
         "controller": {
@@ -589,6 +630,10 @@ def _public_config() -> Dict:
             "pc2_input": inputs.get("pc2", "0x11"),
         },
         "streamdeck": {
+            "device_detected": layout is not None,
+            "rows": rows,
+            "columns": columns,
+            "key_count": rows * columns,
             "brightness": config.get("streamdeck", {}).get(
                 "brightness",
                 85,
@@ -792,83 +837,29 @@ class SystemUpdatePayload(BaseModel):
     target_tag: Optional[str] = None
 
 
-def _perform_git_release_update(target_tag: Optional[str] = None) -> Tuple[bool, str]:
-    project_dir = Path(__file__).resolve().parents[3]
-    if not (project_dir / ".git").exists():
-        for p in Path(__file__).resolve().parents:
-            if (p / ".git").exists():
-                project_dir = p
-                break
-
-    if not (project_dir / ".git").exists():
-        return False, "This installation is not running from a Git repository."
-
-    try:
-        fetch_res = subprocess.run(
-            ["git", "fetch", "--tags"],
-            cwd=str(project_dir),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if fetch_res.returncode != 0:
-            return False, f"git fetch failed: {fetch_res.stderr.strip()}"
-
-        if not target_tag:
-            info = GitHubReleaseUpdater.check_for_updates()
-            target_tag = info.get("latest_version")
-            if not target_tag:
-                return False, "Could not determine latest release version from GitHub."
-
-        target_tag = str(target_tag).strip()
-        if not re.match(r"^v?[0-9]+\.[0-9]+(\.[0-9]+)?.*$", target_tag):
-            return False, f"Invalid release version: {target_tag}"
-
-        checkout_res = subprocess.run(
-            ["git", "checkout", target_tag],
-            cwd=str(project_dir),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if checkout_res.returncode != 0:
-            return False, f"git checkout failed: {checkout_res.stderr.strip()}"
-
-        pip_res = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "-e",
-                f"{project_dir}[pi,acroname]",
-            ],
-            cwd=str(project_dir),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if pip_res.returncode != 0:
-            return False, f"pip install failed: {pip_res.stderr.strip()}"
-
-        return True, f"Successfully updated to {target_tag}"
-    except Exception as exc:
-        logger.exception("Failed performing Git release update")
-        return False, f"Update failed: {exc}"
-
-
 @router.get(
     "/api/v1/system/version",
     dependencies=[Depends(_require_lan_request)],
 )
 def get_system_version():
-    info = GitHubReleaseUpdater.check_for_updates()
+    latest = source_version.github_head()
+    running = source_version.RUNNING_SOURCE
+    release = GitHubReleaseUpdater.check_for_updates()
     return {
         "current_version": f"v{__version__}",
-        "latest_version": info.get("latest_version", f"v{__version__}"),
-        "update_available": bool(info.get("update_available", False)),
-        "release_notes": info.get("release_notes", ""),
-        "release_url": info.get("release_url", ""),
+        "current_commit": running["commit"],
+        "current_dirty": running["dirty"],
+        "current_provenance": running["provenance"],
+        "latest_commit": latest["commit"],
+        "latest_commit_url": latest["url"],
+        "source_status": source_version.version_status(running, latest),
+        # Release tags may lag the default branch; they are not a source update.
+        "latest_version": release.get("latest_version"),
+        "update_available": release.get("update_available")
+        if release.get("latest_version")
+        else None,
+        "release_notes": release.get("release_notes", ""),
+        "release_url": release.get("release_url", ""),
     }
 
 
@@ -877,19 +868,13 @@ def get_system_version():
     dependencies=[Depends(_require_same_origin)],
 )
 def apply_system_update(payload: Optional[SystemUpdatePayload] = None):
-    target_tag = payload.target_tag if payload else None
-    success, message = _perform_git_release_update(target_tag=target_tag)
-    if not success:
-        raise HTTPException(status_code=500, detail=message)
-
-    if _RESTART_CALLBACK is not None:
-        threading.Timer(1.0, _RESTART_CALLBACK).start()
-
-    return {
-        "status": "updated",
-        "message": message,
-        "restart_scheduled": bool(_RESTART_CALLBACK is not None),
-    }
+    # Historically this checked out a release tag in an unrelated/stale .git
+    # directory. The deployer uses rsync, so that checkout cannot prove what
+    # source the running controller actually received. Fail closed.
+    raise HTTPException(
+        status_code=409,
+        detail="Use scripts/deploy.sh from a trusted checkout to update this Pi; the web updater cannot verify deployed source.",
+    )
 
 
 @router.post(

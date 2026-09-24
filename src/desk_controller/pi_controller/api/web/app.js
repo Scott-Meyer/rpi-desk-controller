@@ -18,14 +18,23 @@ const buttonFields = {
   state_payload: byId("buttonStatePayload"),
   service: byId("buttonService"),
   service_data: byId("buttonServiceData"),
+  off_service: byId("buttonOffService"),
+  off_service_data: byId("buttonOffServiceData"),
+  state_entity: byId("buttonStateEntity"),
+  state_attribute: byId("buttonStateAttribute"),
+  active_state: byId("buttonActiveState"),
+  inactive_state: byId("buttonInactiveState"),
+  active_label: byId("buttonActiveLabel"),
 };
 
 let buttons = new Map();
 let selectedKey = 0;
+let liveToggleStates = {};
 let hubLoading = false;
 let connectionStatusLoading = false;
 let externalMqttPort = 1883;
 let desiredUsbHost = 0;
+const maxConfiguredKeys = 32;
 
 const blankButton = (key) => ({
   key,
@@ -44,6 +53,13 @@ const blankButton = (key) => ({
     state_payload: "",
     service: "",
     service_data: {},
+    off_service: "",
+    off_service_data: {},
+    state_entity: "",
+    state_attribute: "",
+    active_state: "",
+    inactive_state: "",
+    active_label: "",
 });
 
 const portRow = (index) => {
@@ -95,13 +111,24 @@ for (let index = 0; index < 8; index += 1) {
   byId("usbPorts").append(portRow(index));
 }
 
-for (let key = 0; key < 15; key += 1) {
-  const item = document.createElement("button");
-  item.type = "button";
-  item.className = "deck-key";
-  item.dataset.key = key;
-  item.addEventListener("click", () => selectKey(key));
-  byId("deckGrid").append(item);
+function displayDeckLayout(streamdeck) {
+  const rows = Number(streamdeck.rows) || 3;
+  const columns = Number(streamdeck.columns) || 5;
+  const count = Math.min(Number(streamdeck.key_count) || rows * columns, maxConfiguredKeys);
+  const grid = byId("deckGrid");
+  grid.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
+  grid.replaceChildren();
+  for (let key = 0; key < count; key += 1) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "deck-key";
+    item.dataset.key = key;
+    item.addEventListener("click", () => selectKey(key));
+    grid.append(item);
+  }
+  byId("deckDimensions").textContent = streamdeck.device_detected
+    ? `Physical ${columns} × ${rows} layout (${count} keys)`
+    : "Stream Deck not detected — previewing a 5 × 3 layout";
 }
 
 const defaultSection = tabs[0].dataset.section;
@@ -171,6 +198,8 @@ function setConnectionHealth(id, stateId, detailId, state, detail, healthy) {
 }
 
 function renderConnectionStatus(status) {
+  liveToggleStates = status.ha_toggles || {};
+  renderDeck();
   const mqtt = status.mqtt;
   setConnectionHealth(
     "mqttHealth",
@@ -384,7 +413,16 @@ function renderDeck() {
       current_time: "Current time",
       current_date: "Current date",
     }[button.action_type];
-    const label = button.enabled ? (dynamicLabel || button.label || "Empty") : "Empty";
+    const toggleState = button.action_type === "ha_toggle" ? liveToggleStates[key] : null;
+    const label = button.enabled
+      ? (toggleState === "active" ? (button.active_label || button.label)
+        : toggleState === "unavailable" ? "UNAVAILABLE"
+        : toggleState === "moving" ? "MOVING"
+        : toggleState === "other" ? "PARTIAL / CUSTOM"
+        : toggleState === "mixed" ? "MIXED"
+        : (dynamicLabel || button.label || "Empty"))
+      : "Empty";
+    element.classList.toggle("active", toggleState === "active");
     const position = document.createElement("span");
     position.className = "deck-position";
     position.textContent = key + 1;
@@ -405,6 +443,7 @@ function configureActionFields() {
     audio_output: "Audio output name",
     ha_scene: "Home Assistant scene",
     ha_service: "Home Assistant entity (optional)",
+    ha_toggle: "Home Assistant entity (optional)",
     mqtt: "Optional action target",
     current_time: "Action target",
     current_date: "Action target",
@@ -413,10 +452,14 @@ function configureActionFields() {
     workstation_slot: "Action target",
   };
   byId("targetField").firstChild.textContent = labels[action] || "Action target";
-  byId("targetField").hidden = !["audio_output", "ha_scene", "ha_service"].includes(action);
+  byId("targetField").hidden = !["audio_output", "ha_scene", "ha_service", "ha_toggle"].includes(action);
   byId("offTargetField").hidden = action !== "ha_scene";
-  byId("haServiceField").hidden = action !== "ha_service";
-  byId("haServiceDataField").hidden = action !== "ha_service";
+  byId("haServiceField").hidden = !["ha_service", "ha_toggle"].includes(action);
+  byId("haServiceDataField").hidden = !["ha_service", "ha_toggle"].includes(action);
+  for (const id of ["haOffServiceField", "haOffServiceDataField", "haStateEntityField", "haStateAttributeField", "haActiveStateField", "haInactiveStateField", "haActiveLabelField"]) {
+    byId(id).hidden = action !== "ha_toggle";
+  }
+  byId("haServiceField").firstChild.textContent = action === "ha_toggle" ? "Service when inactive" : "Home Assistant service";
   byId("mqttTopicField").hidden = action !== "mqtt";
   byId("mqttPayloadField").hidden = action !== "mqtt";
   byId("slotIdField").hidden = action !== "workstation_slot";
@@ -450,6 +493,15 @@ function selectKey(key) {
   buttonFields.service_data.value = Object.keys(button.service_data || {}).length
     ? JSON.stringify(button.service_data, null, 2)
     : "";
+  buttonFields.off_service.value = button.off_service || "";
+  buttonFields.off_service_data.value = Object.keys(button.off_service_data || {}).length
+    ? JSON.stringify(button.off_service_data, null, 2)
+    : "";
+  buttonFields.state_entity.value = button.state_entity || "";
+  buttonFields.state_attribute.value = button.state_attribute || "";
+  buttonFields.active_state.value = button.active_state || "";
+  buttonFields.inactive_state.value = button.inactive_state || "";
+  buttonFields.active_label.value = button.active_label || "";
   configureActionFields();
   renderDeck();
 }
@@ -462,6 +514,15 @@ function updateSelectedButton() {
       serviceData = JSON.parse(serviceDataText);
     } catch (_error) {
       serviceData = serviceDataText;
+    }
+  }
+  let offServiceData = {};
+  const offServiceDataText = buttonFields.off_service_data.value.trim();
+  if (offServiceDataText) {
+    try {
+      offServiceData = JSON.parse(offServiceDataText);
+    } catch (_error) {
+      offServiceData = offServiceDataText;
     }
   }
   const button = {
@@ -481,6 +542,13 @@ function updateSelectedButton() {
     state_payload: buttonFields.state_payload.value,
     service: buttonFields.service.value,
     service_data: serviceData,
+    off_service: buttonFields.off_service.value,
+    off_service_data: offServiceData,
+    state_entity: buttonFields.state_entity.value,
+    state_attribute: buttonFields.state_attribute.value,
+    active_state: buttonFields.active_state.value,
+    inactive_state: buttonFields.inactive_state.value,
+    active_label: buttonFields.active_label.value,
   };
   buttons.set(selectedKey, button);
   configureActionFields();
@@ -561,8 +629,9 @@ function populate(config) {
   syncConnectionFields();
   syncUsbSwitchFields();
 
+  displayDeckLayout(config.streamdeck);
   buttons = new Map();
-  for (let key = 0; key < 15; key += 1) {
+  for (let key = 0; key < maxConfiguredKeys; key += 1) {
     buttons.set(key, blankButton(key));
   }
   config.streamdeck.buttons.forEach((button) => {
@@ -582,6 +651,12 @@ function populate(config) {
   });
 
   selectKey(0);
+  const hiddenCount = [...buttons.values()].filter(
+    (button) => button.enabled && button.key >= byId("deckGrid").children.length,
+  ).length;
+  byId("deckOverflowNote").textContent = hiddenCount
+    ? `${hiddenCount} configured key(s) are beyond this deck's physical layout. They are preserved when you save.`
+    : "";
   byId("connectionBadge").textContent = "Checking…";
   byId("connectionBadge").className = "badge";
 }
@@ -801,92 +876,59 @@ byId("usbPorts").addEventListener("click", (event) => {
   sendPortCommand(port, { action });
 });
 
-let latestReleaseTag = null;
+function showSourceCommit(element, commit, url, suffix = "") {
+  element.replaceChildren();
+  if (!/^[0-9a-f]{40}$/.test(commit || "")) {
+    element.textContent = "Unknown";
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = url;
+  link.rel = "noopener noreferrer";
+  link.target = "_blank";
+  link.textContent = commit.slice(0, 12);
+  element.append(link, document.createTextNode(suffix));
+}
 
 async function checkSystemVersion() {
   const card = byId("systemVersionCard");
-  const currentVer = byId("currentVersionText");
   const detailText = byId("versionDetailText");
   const badge = byId("versionStatusBadge");
-  const notesBlock = byId("releaseNotesBlock");
-  const notesText = byId("releaseNotesText");
-  const applyBtn = byId("applyUpdateBtn");
-
-  if (!card) return;
-
   try {
     card.className = "connection-health checking";
     badge.textContent = "Checking GitHub…";
-    detailText.textContent = "Checking GitHub Releases for updates…";
+    detailText.textContent = "Checking the GitHub default branch…";
 
     const response = await fetch("/api/v1/system/version", { cache: "no-store" });
-    if (!response.ok) throw new Error("Could not check version");
+    if (!response.ok) throw new Error("Could not read controller version");
     const data = await response.json();
+    byId("currentVersionText").textContent = `Desk Controller ${data.current_version}`;
+    showSourceCommit(
+      byId("runningCommit"), data.current_commit,
+      `https://github.com/Scott-Meyer/rpi-desk-controller/commit/${data.current_commit}`,
+      `${data.current_dirty ? " (locally modified)" : ""} — ${data.current_provenance}`,
+    );
+    showSourceCommit(byId("githubCommit"), data.latest_commit, data.latest_commit_url);
+    byId("githubRelease").textContent = data.latest_version || "Unknown (GitHub Releases unavailable)";
 
-    currentVer.textContent = `Desk Controller ${data.current_version}`;
-    latestReleaseTag = data.latest_version;
-
-    if (data.update_available) {
-      card.className = "connection-health offline";
-      badge.className = "status error";
-      badge.textContent = `Update available (${data.latest_version})`;
-      detailText.textContent = `A newer release ${data.latest_version} is available on GitHub.`;
-      if (data.release_notes) {
-        notesBlock.style.display = "block";
-        notesText.textContent = data.release_notes;
-      }
-      applyBtn.style.display = "inline-block";
-      applyBtn.textContent = `Update to ${data.latest_version}`;
-    } else {
-      card.className = "connection-health online";
-      badge.className = "status success";
-      badge.textContent = "Up to date";
-      detailText.textContent = `You are running the latest version (${data.current_version}).`;
-      notesBlock.style.display = "none";
-      applyBtn.style.display = "none";
-    }
+    const sourceMessages = {
+      current: ["Matches GitHub", "The installed source matches GitHub's default-branch head."],
+      different: ["Different revision", "The installed source differs from GitHub's default-branch head. It could be older or on another branch."],
+      modified: ["Locally modified", "This installation includes source changes beyond its recorded commit."],
+      unknown: ["Comparison unavailable", "The installed revision or GitHub head could not be verified. This is not an up-to-date confirmation."],
+    };
+    const [title, detail] = sourceMessages[data.source_status] || sourceMessages.unknown;
+    badge.textContent = title;
+    badge.className = data.source_status === "current" ? "status success" : "status";
+    card.className = data.source_status === "current" ? "connection-health online" : "connection-health checking";
+    detailText.textContent = detail;
   } catch (error) {
-    card.className = "connection-health offline";
+    card.className = "connection-health checking";
     badge.className = "status";
-    badge.textContent = "Check failed";
-    detailText.textContent = `Could not reach GitHub: ${error.message}`;
-  }
-}
-
-async function applySystemUpdate() {
-  const btn = byId("applyUpdateBtn");
-  const msg = byId("updateMessage");
-  btn.disabled = true;
-  msg.style.color = "var(--cyan)";
-  msg.textContent = `Fetching and applying ${latestReleaseTag || "latest release"}… Please wait.`;
-
-  try {
-    const response = await fetch("/api/v1/system/update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_tag: latestReleaseTag }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "Update failed");
-
-    msg.style.color = "var(--green)";
-    msg.textContent = `✓ ${data.message}. The controller service is restarting now. Reconnecting…`;
-
-    setTimeout(() => {
-      const pollInterval = setInterval(async () => {
-        try {
-          const res = await fetch("/api/v1/config", { cache: "no-store" });
-          if (res.ok) {
-            clearInterval(pollInterval);
-            window.location.reload();
-          }
-        } catch {}
-      }, 2000);
-    }, 2000);
-  } catch (error) {
-    btn.disabled = false;
-    msg.style.color = "var(--danger)";
-    msg.textContent = `✗ ${error.message}`;
+    badge.textContent = "Comparison unavailable";
+    detailText.textContent = `Could not read controller version: ${error.message}`;
+    byId("githubCommit").textContent = "Unknown";
+    byId("githubRelease").textContent = "Unknown";
   }
 }
 
@@ -924,7 +966,6 @@ async function restartSystemService() {
 }
 
 byId("checkUpdatesBtn")?.addEventListener("click", checkSystemVersion);
-byId("applyUpdateBtn")?.addEventListener("click", applySystemUpdate);
 byId("restartServiceBtn")?.addEventListener("click", restartSystemService);
 
 fetch("/api/v1/config", { cache: "no-store" })

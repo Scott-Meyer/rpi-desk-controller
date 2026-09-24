@@ -70,11 +70,14 @@ that is waiting to publish after reconnection.
 The Pi publishes its physical controls and USB hub under
 `desk/rpi_desk_controller`:
 
-- `streamdeck/action` is a simple `key_0` through `key_14` press event.
+- `streamdeck/action` publishes `key_0` through the final physical key. The
+  number of keys and the button editor follow the connected Stream Deck (for
+  example, a six-key Module appears as 2 × 3). If it is disconnected, the
+  editor says so and previews the older 5 × 3 layout.
 - `streamdeck/event` is a richer JSON press event containing the physical
   row, column, label, action, and state group.
 - `streamdeck/layout` and `streamdeck/state` are retained so consumers can
-  discover the complete 5-by-3 layout and its active groups.
+  discover the connected layout and its active groups.
 - Every key without a Pi action automatically belongs to the currently
   selected workstation. The Pi caches every workstation profile, leaves
   unassigned or offline keys blank, and illuminates a key while its
@@ -91,7 +94,14 @@ The Pi publishes its physical controls and USB hub under
   `reset_data`, `reset_power`, and `clear_errors` actions are also supported.
   Per-port JSON state and simple `ON`/`OFF` state are retained beside it.
 
-When enabled, Home Assistant MQTT discovery registers every Stream Deck key as
+The Version & Updates tab shows the running source revision, GitHub's current
+default-branch revision, and the latest release separately. SSH deployment stamps
+the exact source it transfers; an unknown revision or a failed GitHub lookup
+is never presented as up to date. Update the Pi from a trusted checkout with
+`scripts/deploy.sh`; the old web release-tag updater cannot safely update an
+rsynced installation and is disabled.
+
+When enabled, Home Assistant MQTT discovery registers every physical Stream Deck key as
 a device trigger. Each controllable Acroname USB port receives switches for
 the whole port, power, USB 2, and USB 3; electrical and device sensors;
 attachment state; current-limit and charging-mode controls; and

@@ -1,0 +1,107 @@
+"""State-observed two-way Home Assistant controls for Stream Deck buttons."""
+
+from typing import Any, Mapping
+
+from desk_controller.pi_controller.integrations.homeassistant import HomeAssistantClient
+
+
+def read_toggle_state(button: Mapping[str, Any], ha: HomeAssistantClient) -> str:
+    """Return active, inactive, mixed, moving, other, or unavailable.
+
+    A multi-cover control is active only once *every* cover reaches the target.
+    Unavailable or moving entities never cause a speculative action.
+    """
+    entities = [
+        value.strip() for value in str(button.get("state_entity", "")).split(",")
+    ]
+    if not entities or not all(entities) or not button.get("active_state"):
+        return "unavailable"
+    if not toggle_targets_observed(button):
+        return "unavailable"
+
+    states = []
+    for entity in entities:
+        result = ha.get_state(entity)
+        if not isinstance(result, dict) or result.get("state") in (
+            None,
+            "unknown",
+            "unavailable",
+        ):
+            return "unavailable"
+        if result["state"] in ("opening", "closing"):
+            return "moving"
+        attribute = str(button.get("state_attribute", "")).strip()
+        value = (
+            result.get("attributes", {}).get(attribute)
+            if attribute
+            else result["state"]
+        )
+        if value is None:
+            return "unavailable"
+        states.append(str(value))
+
+    if all(value == str(button["active_state"]) for value in states):
+        return "active"
+    inactive = str(button.get("inactive_state", ""))
+    if inactive and all(value == inactive for value in states):
+        return "inactive"
+    if len(set(states)) > 1:
+        return "mixed"
+    return "other" if inactive else "inactive"
+
+
+def toggle_targets_observed(button: Mapping[str, Any]) -> bool:
+    """Reject HA actions that might reach more than the observed entities."""
+    observed = {
+        entity.strip() for entity in str(button.get("state_entity", "")).split(",")
+    }
+    if not observed or "" in observed:
+        return False
+    for prefix in ("", "off_"):
+        service = str(button.get(f"{prefix}service", ""))
+        data = button.get(f"{prefix}service_data", {})
+        if not isinstance(data, dict):
+            return False
+        if service == "mqtt.publish":
+            if not data.get("topic") or not data.get("payload"):
+                return False
+            continue
+        if any(
+            selector in data
+            for selector in ("area_id", "device_id", "floor_id", "label_id", "target")
+        ):
+            return False
+        # call_service uses setdefault, so an explicit null/empty entity_id
+        # must not be treated as if it would fall back to the button target.
+        raw_targets = (
+            data["entity_id"] if "entity_id" in data else button.get("target", "")
+        )
+        if isinstance(raw_targets, str):
+            targets = {value.strip() for value in raw_targets.split(",")}
+        elif isinstance(raw_targets, list) and all(
+            isinstance(value, str) for value in raw_targets
+        ):
+            targets = set(raw_targets)
+        else:
+            return False
+        if targets != observed:
+            return False
+    return True
+
+
+def press_toggle(
+    button: Mapping[str, Any], ha: HomeAssistantClient
+) -> tuple[bool, str]:
+    """Choose from freshly read state, then call the opposite configured service."""
+    if not toggle_targets_observed(button):
+        return False, "unavailable"
+    state = read_toggle_state(button, ha)
+    if state in ("unavailable", "moving"):
+        return False, state
+    service_prefix = "off_" if state == "active" else ""
+    success = ha.call_service(
+        str(button.get(f"{service_prefix}service", "")),
+        str(button.get("target", "")),
+        button.get(f"{service_prefix}service_data", {}),
+    )
+    return success, state

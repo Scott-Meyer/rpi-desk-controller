@@ -243,12 +243,13 @@
 
           <div class="section-heading">
             <div>
-              <p class="kicker">Physical 5 × 3 layout</p>
+              <p class="kicker" id="deckDimensions">Detecting Stream Deck…</p>
               <h2>Button map</h2>
             </div>
             <span class="status">Select a key to edit it</span>
           </div>
-          <p class="note deck-note">Every physical press is published to MQTT, including empty keys. Buttons in the same group are mutually exclusive, so only the active audio, lighting, or shade profile glows.</p>
+          <p class="note deck-note">Every physical press is published to MQTT, including empty keys. State groups are mutually exclusive; Home Assistant toggles instead follow their observed device state and show when it is moving or unavailable.</p>
+          <p id="deckOverflowNote" class="note" role="status"></p>
 
           <div class="deck-workspace">
             <div>
@@ -275,6 +276,7 @@
                     <option value="audio_output">Select audio output</option>
                     <option value="ha_scene">Activate HA scene</option>
                     <option value="ha_service">Call Home Assistant service</option>
+                    <option value="ha_toggle">Toggle from Home Assistant state</option>
                     <option value="mqtt">Publish custom MQTT</option>
                     <option value="workstation_slot" hidden>Legacy computer slot</option>
                   </select>
@@ -302,7 +304,14 @@
                 <label id="targetField">Action target<input id="buttonTarget"></label>
                 <label id="offTargetField">Second press / off automation<input id="buttonOffTarget" placeholder="automation.turn_off…"></label>
                 <label id="haServiceField">Home Assistant service<input id="buttonService" placeholder="light.toggle"></label>
-                <label id="haServiceDataField">Service data (JSON)<textarea id="buttonServiceData" rows="3" placeholder='{"brightness_pct": 50}'></textarea></label>
+                <label id="haServiceDataField">Service data when inactive (JSON)<textarea id="buttonServiceData" rows="3" placeholder='{"brightness_pct": 50}'></textarea></label>
+                <label id="haOffServiceField">Service when active<input id="buttonOffService" placeholder="cover.open_cover"></label>
+                <label id="haOffServiceDataField">Service data when active (JSON)<textarea id="buttonOffServiceData" rows="3" placeholder='{"entity_id": ["cover.office_1", "cover.office_2"]}'></textarea></label>
+                <label id="haStateEntityField">Observe entities (comma separated)<input id="buttonStateEntity" placeholder="cover.office_1,cover.office_2"></label>
+                <label id="haStateAttributeField">Observe attribute (blank for entity state)<input id="buttonStateAttribute" placeholder="fan_mode"></label>
+                <label id="haActiveStateField">Active value<input id="buttonActiveState" placeholder="0"></label>
+                <label id="haInactiveStateField">Inactive value (optional)<input id="buttonInactiveState" placeholder="100"></label>
+                <label id="haActiveLabelField">Label while active<input id="buttonActiveLabel" placeholder="OFFICE CLOSED"></label>
                 <label id="mqttTopicField">Custom MQTT topic<input id="buttonMqttTopic"></label>
                 <label id="mqttPayloadField">Custom MQTT payload<input id="buttonMqttPayload"></label>
                 <label id="slotIdField" hidden>Legacy computer slot ID<input id="buttonSlotId"></label>
@@ -337,7 +346,7 @@
         <section id="system" class="panel">
           <div class="section-heading">
             <div>
-              <p class="kicker">Release management</p>
+              <p class="kicker">Installed source &amp; GitHub</p>
               <h2>Version &amp; Updates</h2>
             </div>
             <span id="versionStatusBadge" class="status">Checking GitHub…</span>
@@ -346,19 +355,18 @@
           <div id="systemVersionCard" class="connection-health checking" style="margin-top: 14px;">
             <span class="health-dot" aria-hidden="true"></span>
             <div>
-              <strong id="currentVersionText">Desk Controller Version</strong>
-              <span id="versionDetailText">Checking for updates from GitHub releases…</span>
+              <strong id="currentVersionText">Reading installed source…</strong>
+              <span id="versionDetailText">Checking the GitHub default branch…</span>
             </div>
           </div>
 
-          <div id="releaseNotesBlock" class="note" style="margin-top: 16px; display: none; background: rgba(255,255,255,0.03); padding: 14px; border-radius: 8px; border: 1px solid var(--line);">
-            <strong style="color: var(--text);">Latest Release Notes:</strong>
-            <p id="releaseNotesText" style="margin-top: 6px; white-space: pre-wrap; font-size: 12px;"></p>
-          </div>
+          <p class="note">Running source: <span id="runningCommit">Unknown</span></p>
+          <p class="note">Latest GitHub default branch: <span id="githubCommit">Checking…</span></p>
+          <p class="note">Latest published release: <span id="githubRelease">Checking…</span></p>
+          <p class="note">To update source, deploy from a trusted checkout with <code>scripts/deploy.sh</code>. GitHub releases can lag the default branch; this page does not install code.</p>
 
           <div style="display: flex; gap: 12px; margin-top: 20px; align-items: center;">
-            <button type="button" id="checkUpdatesBtn" class="secondary">Check for Updates</button>
-            <button type="button" id="applyUpdateBtn" class="primary" style="display: none;">Update to Latest Release</button>
+            <button type="button" id="checkUpdatesBtn" class="secondary">Check GitHub</button>
             <button type="button" id="restartServiceBtn" class="secondary" style="margin-left: auto;">Restart Service</button>
           </div>
           <p id="updateMessage" class="note" style="margin-top: 12px;"></p>

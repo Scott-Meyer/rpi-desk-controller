@@ -56,10 +56,11 @@ from desk_controller.pi_controller.drivers.streamdeck_mgr import StreamDeckManag
 from desk_controller.pi_controller.drivers.usb_switch import (
     create_usb_controller,
 )
+from desk_controller.pi_controller.ha_toggle import press_toggle, read_toggle_state
 from desk_controller.pi_controller.integrations.homeassistant import HomeAssistantClient
 from desk_controller.pi_controller.streamdeck_layout import (
     DYNAMIC_DATETIME_ACTIONS,
-    STREAMDECK_KEY_COUNT,
+    MAX_STREAMDECK_KEY_COUNT,
     configured_streamdeck_buttons,
     configured_usb_ports,
     datetime_button_label,
@@ -188,6 +189,10 @@ class DeskControllerApp:
         self.active_audio_device = ""
         self._audio_state_by_host: Dict[str, str] = {}
         self.active_groups: Dict[str, int] = {}
+        self._ha_toggle_states: Dict[int, str] = {}
+        self._ha_toggle_in_flight: set[int] = set()
+        self._ha_toggle_lock = threading.RLock()
+        self._last_ha_toggle_poll = 0.0
         self._clock_display_minute: Optional[str] = None
 
         # Setup MQTT Client with HA credentials
@@ -221,6 +226,7 @@ class DeskControllerApp:
             self.config_path,
             restart_callback=self._request_restart,
             connection_status_provider=self._connection_status,
+            streamdeck_layout_provider=self.streamdeck.layout,
         )
 
     def _connection_status(self) -> Dict[str, Any]:
@@ -274,6 +280,7 @@ class DeskControllerApp:
                 "recovery_count": mqtt_health.get("recovery_count", 0),
             },
             "homeassistant": homeassistant_status,
+            "ha_toggles": dict(getattr(self, "_ha_toggle_states", {})),
         }
 
     def _request_restart(self):
@@ -1361,12 +1368,32 @@ class DeskControllerApp:
             "configuration_url": self._configuration_url(),
         }
 
+    def _deck_dimensions(self) -> tuple[int, int]:
+        """Use actual attached geometry, retaining a preview when no deck exists."""
+        deck = getattr(self, "streamdeck", None)
+        layout = deck.layout() if deck is not None else None
+        if (
+            isinstance(layout, tuple)
+            and len(layout) == 2
+            and all(isinstance(value, int) and value > 0 for value in layout)
+        ):
+            return layout
+        return 3, 5
+
     def register_ha_streamdeck_discovery(self):
         """Expose every physical key as a native Home Assistant device trigger."""
         if not getattr(self, "homeassistant_enabled", True):
             return
         action_topic = f"{self.STREAMDECK_TOPIC}/action"
-        for key in range(STREAMDECK_KEY_COUNT):
+        rows, columns = self._deck_dimensions()
+        for key in range(rows * columns, MAX_STREAMDECK_KEY_COUNT):
+            # HA discovery is retained; clear keys from a previously larger deck.
+            self.mqtt.publish(
+                f"homeassistant/device_automation/{self.device_id}/streamdeck_key_{key}/config",
+                "",
+                retain=True,
+            )
+        for key in range(rows * columns):
             payload = {
                 "automation_type": "trigger",
                 "type": "button_short_press",
@@ -1626,14 +1653,15 @@ class DeskControllerApp:
     def _publish_streamdeck_layout(self):
         buttons = []
         physical_buttons = getattr(self, "physical_buttons", {})
-        for key in range(STREAMDECK_KEY_COUNT):
+        rows, columns = self._deck_dimensions()
+        for key in range(rows * columns):
             configured = key in physical_buttons
             button = self.buttons.get(key, {})
             buttons.append(
                 {
                     "key": key,
-                    "row": key // 5,
-                    "column": key % 5,
+                    "row": key // columns,
+                    "column": key % columns,
                     "configured": configured,
                     **button,
                 }
@@ -1659,8 +1687,8 @@ class DeskControllerApp:
         self.mqtt.publish(
             f"{self.STREAMDECK_TOPIC}/layout",
             {
-                "rows": 3,
-                "columns": 5,
+                "rows": rows,
+                "columns": columns,
                 "buttons": buttons,
                 "controller_url": controller_url,
             },
@@ -1682,6 +1710,7 @@ class DeskControllerApp:
             f"{self.STREAMDECK_TOPIC}/state",
             {
                 "active_groups": self.active_groups,
+                "ha_toggles": dict(getattr(self, "_ha_toggle_states", {})),
                 "active_audio_device": self.active_audio_device or None,
                 "active_host": f"PC{self.current_pc + 1}",
                 "active_workstation": workstation_state,
@@ -1691,6 +1720,7 @@ class DeskControllerApp:
         )
 
     def _publish_button_event(self, key: int, button: Dict[str, Any]):
+        _, columns = self._deck_dimensions()
         action_payload = f"key_{key}"
         self.mqtt.publish(
             f"{self.STREAMDECK_TOPIC}/action",
@@ -1703,8 +1733,8 @@ class DeskControllerApp:
                 "event": "press",
                 "key": key,
                 "button_number": key + 1,
-                "row": key // 5,
-                "column": key % 5,
+                "row": key // columns,
+                "column": key % columns,
                 "configured": bool(button),
                 "label": button.get("label", f"Key {key + 1}"),
                 "group": button.get("group", ""),
@@ -1989,6 +2019,35 @@ class DeskControllerApp:
             self._update_sd_keys()
             self._publish_streamdeck_state()
 
+    def _start_ha_toggle(self, key: int, button: Dict[str, Any]) -> bool:
+        """Keep HA network I/O off the Stream Deck's input-reader thread."""
+        with self._ha_toggle_lock:
+            if key in self._ha_toggle_in_flight:
+                return False
+            self._ha_toggle_in_flight.add(key)
+
+        def run():
+            try:
+                success, observed_state = press_toggle(button, self.ha)
+                self._ha_toggle_states[key] = observed_state
+                if not success:
+                    logger.warning(
+                        "Home Assistant toggle on key %s was not accepted", key
+                    )
+            except Exception:
+                logger.exception("Home Assistant toggle on key %s failed", key)
+            finally:
+                with self._ha_toggle_lock:
+                    self._ha_toggle_in_flight.discard(key)
+                self._last_ha_toggle_poll = 0.0
+                self._update_sd_keys()
+                self._publish_streamdeck_state()
+
+        worker = threading.Thread(target=run, name=f"ha-toggle-{key}", daemon=True)
+        worker.start()
+        self._update_sd_keys()
+        return True
+
     def _handle_key_press(self, key: int):
         logger.info("Stream Deck key pressed: %s", key)
         with self._kvm_lock:
@@ -2041,6 +2100,13 @@ class DeskControllerApp:
                 action_succeeded = self.ha.activate_scene(target)
                 if action_succeeded and group:
                     self.active_groups[group] = key
+
+        elif action_type == "ha_toggle":
+            if not getattr(self, "homeassistant_enabled", True):
+                logger.warning("Ignoring Home Assistant toggle: integration disabled")
+            else:
+                self._start_ha_toggle(key, button)
+                return
 
         elif action_type == "ha_service":
             if not getattr(self, "homeassistant_enabled", True):
@@ -2095,6 +2161,7 @@ class DeskControllerApp:
                 "audio_output",
                 "ha_scene",
                 "ha_service",
+                "ha_toggle",
                 "mqtt",
                 "workstation_slot",
                 *DYNAMIC_DATETIME_ACTIONS,
@@ -2109,7 +2176,8 @@ class DeskControllerApp:
         selected_workstation = self._get_active_hostname()
         selected_agent_online = self._selected_agent_online()
         rendered_at = datetime.now().astimezone()
-        for key in range(STREAMDECK_KEY_COUNT):
+        rows, columns = self._deck_dimensions()
+        for key in range(rows * columns):
             button = self.buttons.get(key)
             if not button or not button.get("enabled", True):
                 self.streamdeck.render_scene_key(
@@ -2159,6 +2227,21 @@ class DeskControllerApp:
                     button.get("_agent_online") and button.get("_slot_configured")
                 )
                 active = bool(button.get("_slot_active") and is_available)
+            elif action_type == "ha_toggle":
+                is_pending = key in getattr(self, "_ha_toggle_in_flight", set())
+                state = getattr(self, "_ha_toggle_states", {}).get(key, "unavailable")
+                is_available = state != "unavailable"
+                active = state == "active"
+                if state == "active":
+                    label = str(button.get("active_label") or label)
+                elif state == "mixed":
+                    label = "MIXED"
+                elif state == "moving":
+                    label = "MOVING"
+                elif state == "other":
+                    label = "PARTIAL\nCUSTOM"
+                elif state == "unavailable":
+                    label = "UNAVAILABLE"
 
             self.streamdeck.render_scene_key(
                 key=key,
@@ -2173,6 +2256,22 @@ class DeskControllerApp:
                     action_type if action_type in DYNAMIC_DATETIME_ACTIONS else "button"
                 ),
             )
+
+    def _refresh_ha_toggles(self) -> bool:
+        """Refresh observed states without inferring success from service calls."""
+        if not self.homeassistant_enabled:
+            return False
+        changed = False
+        for key, button in self.physical_buttons.items():
+            if button.get("enabled", True) and button.get("action_type") == "ha_toggle":
+                state = read_toggle_state(button, self.ha)
+                if self._ha_toggle_states.get(key) != state:
+                    self._ha_toggle_states[key] = state
+                    changed = True
+        if changed:
+            self._update_sd_keys()
+            self._publish_streamdeck_state()
+        return changed
 
     def _refresh_datetime_buttons(self, now: Optional[datetime] = None) -> bool:
         """Redraw date/time buttons when the displayed local minute changes."""
@@ -2287,6 +2386,9 @@ class DeskControllerApp:
 
         try:
             while not self._stop_event.is_set():
+                if time.monotonic() - self._last_ha_toggle_poll >= 10:
+                    self._last_ha_toggle_poll = time.monotonic()
+                    self._refresh_ha_toggles()
                 self._refresh_datetime_buttons()
                 if self._process_pending_workstation_requests():
                     self._update_sd_keys()

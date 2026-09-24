@@ -4,7 +4,10 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, Mapping
 
-STREAMDECK_KEY_COUNT = 15
+STREAMDECK_KEY_COUNT = (
+    15  # Undetected fallback and legacy layout; hardware is authoritative.
+)
+MAX_STREAMDECK_KEY_COUNT = 32
 USB_HUB_PORT_COUNT = 8
 DYNAMIC_DATETIME_ACTIONS = frozenset({"current_time", "current_date"})
 
@@ -55,7 +58,7 @@ def _integer_key_mapping(value: Any) -> Dict[int, Dict[str, Any]]:
             key = int(raw_key)
         except (TypeError, ValueError):
             continue
-        if 0 <= key < STREAMDECK_KEY_COUNT and isinstance(raw_value, Mapping):
+        if 0 <= key < MAX_STREAMDECK_KEY_COUNT and isinstance(raw_value, Mapping):
             normalized[key] = dict(raw_value)
     return normalized
 

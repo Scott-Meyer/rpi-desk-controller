@@ -71,6 +71,23 @@ audio_devices: {}
         self.restart = Mock()
         configure_config_ui(self.config_path, self.restart)
 
+    def test_connected_six_key_deck_reports_hardware_and_keeps_hidden_buttons(self):
+        stored = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        stored["streamdeck"]["buttons"] = {
+            14: {"enabled": True, "label": "LARGER DECK", "action_type": "none"}
+        }
+        self.config_path.write_text(yaml.safe_dump(stored), encoding="utf-8")
+        configure_config_ui(
+            self.config_path,
+            self.restart,
+            streamdeck_layout_provider=lambda: (2, 3),
+        )
+        config = get_configuration()
+        self.assertEqual(config["streamdeck"]["key_count"], 6)
+        self.assertEqual(config["streamdeck"]["columns"], 3)
+        self.assertTrue(config["streamdeck"]["device_detected"])
+        self.assertIn(14, [button["key"] for button in config["streamdeck"]["buttons"]])
+
     def test_page_and_public_config_never_return_stored_secrets(self):
         page = configuration_page()
         page_text = Path(page.path).read_text(encoding="utf-8")
@@ -332,6 +349,21 @@ audio_devices: {}
             "fan.set_percentage",
         )
 
+    def test_ha_toggle_rejects_unscoped_services(self):
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            StreamDeckButtonSettings.model_validate(
+                {
+                    "key": 2,
+                    "action_type": "ha_toggle",
+                    "state_entity": "cover.office_1,cover.office_2",
+                    "active_state": "closed",
+                    "service": "cover.close_cover",
+                    "off_service": "cover.open_cover",
+                }
+            )
+
     def test_current_date_and_time_buttons_are_validated(self):
         time_button = StreamDeckButtonSettings.model_validate(
             {"key": 1, "action_type": "current_time"}
@@ -440,48 +472,63 @@ audio_devices: {}
     def test_get_system_version(self):
         from unittest.mock import patch
 
-        with patch(
-            "desk_controller.pi_controller.api.config_ui.GitHubReleaseUpdater.check_for_updates"
-        ) as mock_check:
-            mock_check.return_value = {
-                "update_available": True,
-                "latest_version": "v1.2.0",
-                "release_notes": "Added cool features",
-                "release_url": "https://github.com/Scott-Meyer/rpi-desk-controller/releases/tag/v1.2.0",
-            }
+        from desk_controller import source_version
+
+        revision = "a" * 40
+        with (
+            patch(
+                "desk_controller.pi_controller.api.config_ui.GitHubReleaseUpdater.check_for_updates",
+                return_value={"latest_version": "v1.2.0", "update_available": False},
+            ),
+            patch.object(
+                source_version,
+                "RUNNING_SOURCE",
+                {"commit": revision, "dirty": False, "provenance": "deployed source"},
+            ),
+            patch.object(
+                source_version,
+                "github_head",
+                return_value={
+                    "commit": revision,
+                    "url": f"https://github.com/Scott-Meyer/rpi-desk-controller/commit/{revision}",
+                },
+            ),
+        ):
             res = get_system_version()
             self.assertEqual(res["latest_version"], "v1.2.0")
-            self.assertTrue(res["update_available"])
-            self.assertEqual(res["release_notes"], "Added cool features")
+            self.assertEqual(res["current_commit"], revision)
+            self.assertEqual(res["latest_commit"], revision)
+            self.assertEqual(res["source_status"], "current")
 
-    def test_apply_system_update_success(self):
+    def test_version_check_failure_is_not_reported_as_up_to_date(self):
         from unittest.mock import patch
 
-        restart_mock = Mock()
-        configure_config_ui(self.config_path, restart_callback=restart_mock)
+        from desk_controller import source_version
 
-        with patch(
-            "desk_controller.pi_controller.api.config_ui._perform_git_release_update"
-        ) as mock_update:
-            mock_update.return_value = (True, "Successfully updated to v1.2.0")
-            payload = SystemUpdatePayload(target_tag="v1.2.0")
-            res = apply_system_update(payload)
-            self.assertEqual(res["status"], "updated")
-            self.assertTrue(res["restart_scheduled"])
-            self.assertIn("v1.2.0", res["message"])
+        with (
+            patch(
+                "desk_controller.pi_controller.api.config_ui.GitHubReleaseUpdater.check_for_updates",
+                return_value={"update_available": False},
+            ),
+            patch.object(
+                source_version,
+                "github_head",
+                return_value={"commit": None, "url": None},
+            ),
+        ):
+            res = get_system_version()
+            self.assertIsNone(res["latest_commit"])
+            self.assertIsNone(res["latest_version"])
+            self.assertIsNone(res["update_available"])
+            self.assertEqual(res["source_status"], "unknown")
 
-    def test_apply_system_update_failure_raises_500(self):
-        from unittest.mock import patch
-
-        with patch(
-            "desk_controller.pi_controller.api.config_ui._perform_git_release_update"
-        ) as mock_update:
-            mock_update.return_value = (False, "git checkout failed: tag not found")
-            payload = SystemUpdatePayload(target_tag="v99.0.0")
-            with self.assertRaises(HTTPException) as raised:
-                apply_system_update(payload)
-            self.assertEqual(raised.exception.status_code, 500)
-            self.assertIn("git checkout failed", str(raised.exception.detail))
+    def test_web_update_cannot_apply_a_release_to_an_rsync_installation(self):
+        payload = SystemUpdatePayload(target_tag="v99.0.0")
+        with self.assertRaises(HTTPException) as raised:
+            apply_system_update(payload)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("scripts/deploy.sh", str(raised.exception.detail))
+        self.restart.assert_not_called()
 
     def test_restart_system_service(self):
         restart_mock = Mock()
