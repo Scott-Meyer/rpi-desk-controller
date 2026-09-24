@@ -5,6 +5,7 @@ DDC/CI Display Input Switcher using ddcutil on Linux.
 import logging
 import re
 import subprocess
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -33,10 +34,12 @@ class MonitorDDCController:
         display_id: int = 1,
         simulate: bool = False,
         use_alt_addressing: bool = False,
+        verify_writes: bool = False,
     ):
         self.display_id = display_id
         self.simulate = simulate
         self.use_alt_addressing = use_alt_addressing
+        self.verify_writes = verify_writes
         self._simulated_input_source: Optional[int] = None
 
     def _feature_code(self) -> str:
@@ -136,7 +139,34 @@ class MonitorDDCController:
             logger.info(f"Running DDC command: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
-                logger.info(f"Monitor input updated to {input_hex_code}")
+                if self.verify_writes:
+                    try:
+                        expected = int(str(input_hex_code), 16)
+                    except ValueError:
+                        logger.error("Invalid monitor input code: %s", input_hex_code)
+                        return False
+                    consecutive_matches = 0
+                    observed = None
+                    for _ in range(4):
+                        # An ACK is not a switch. Some monitors echo the write
+                        # briefly before applying (or rejecting) the input.
+                        time.sleep(0.6)
+                        observed = self.get_input_source()
+                        consecutive_matches = (
+                            consecutive_matches + 1 if observed == expected else 0
+                        )
+                        if consecutive_matches >= 2:
+                            logger.info(
+                                "Monitor input readback confirmed %s", input_hex_code
+                            )
+                            return True
+                    logger.error(
+                        "Monitor did not confirm input %s (readback: %s)",
+                        input_hex_code,
+                        observed,
+                    )
+                    return False
+                logger.info("Monitor input write accepted: %s", input_hex_code)
                 return True
             else:
                 logger.warning(

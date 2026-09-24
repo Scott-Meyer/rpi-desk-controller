@@ -7,10 +7,12 @@ from pydantic import ValidationError
 
 from desk_controller.pi_controller.api.app import (
     SelectAudioPayload,
+    USBHubCommand,
     USBHubPortCommand,
     clear_telemetry,
     configure_command_publisher,
     configure_usb_hub_api,
+    control_usb_hub,
     control_usb_hub_port,
     get_usb_hub,
     ingest_mqtt_telemetry,
@@ -126,6 +128,15 @@ class MQTTRestBridgeTests(unittest.TestCase):
                 "usb3_data_enabled": True,
             },
         )
+
+    def test_usb_host_command_does_not_accidentally_become_a_name_update(self):
+        hub = Mock(return_value={"success": True, "state": {"active_upstream": 0}})
+        configure_usb_hub_api(None, None, hub)
+
+        result = control_usb_hub(USBHubCommand(active_upstream=0))
+
+        self.assertTrue(result["success"])
+        hub.assert_called_once_with({"active_upstream": 0})
 
     def test_usb_hub_action_cannot_be_combined_with_settings(self):
         with self.assertRaises(ValidationError):

@@ -172,7 +172,7 @@ def get_usb_hub():
 def control_usb_hub(command: USBHubCommand):
     if _USB_HUB_CONTROLLER is None:
         raise HTTPException(status_code=503, detail="USB hub is unavailable")
-    result = _USB_HUB_CONTROLLER(command.model_dump())
+    result = _USB_HUB_CONTROLLER(command.model_dump(exclude_none=True))
     if not result.get("success"):
         raise HTTPException(
             status_code=409,

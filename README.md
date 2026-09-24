@@ -131,7 +131,11 @@ usb_switch:
 control, device discovery, and electrical telemetry. If the monitor itself
 routes USB with its input, select `none` for the separate USB switch; the
 monitor's observed input then determines the active host. A legacy
-`acroname.enabled: false` is recognized as this monitor-routed mode.
+`acroname.enabled: false` is recognized as this monitor-routed mode. In that
+mode a DDC write is not treated as success until the requested input reads
+back consistently. Some monitors acknowledge input codes that do not change
+the picture, so calibrate codes against the monitor's own input menu rather
+than trusting generic MCCS labels or DDC acknowledgments alone.
 
 The UGREEN CM691 / P/N 25164 USB-C 2-in/4-out switch has no software control
 or host-state API. Its included desktop controller is a momentary button, so

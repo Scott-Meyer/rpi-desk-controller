@@ -126,6 +126,10 @@ class DeskControllerApp:
             display_id=monitor_conf.get("display_id", 1),
             simulate=simulate_hardware,
             use_alt_addressing=bool(monitor_conf.get("use_alt_addressing", False)),
+            verify_writes=(
+                getattr(self.acroname, "DRIVER", "") == "none"
+                and not bool(monitor_conf.get("use_alt_addressing", False))
+            ),
         )
 
         ha_conf = self.config.get("homeassistant", {})

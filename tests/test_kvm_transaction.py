@@ -2,6 +2,7 @@ import threading
 import time
 import unittest
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from uuid import uuid4
@@ -538,6 +539,21 @@ class KVMTransactionTests(unittest.TestCase):
             call("desk/kvm/availability", "offline", retain=True),
             controller.mqtt.publish.call_args_list,
         )
+
+    @patch(
+        "desk_controller.pi_controller.main.resolve_config_path",
+        return_value=Path("/tmp/desk-test.yaml"),
+    )
+    @patch("desk_controller.pi_controller.main.load_config")
+    def test_lg_alt_monitor_only_does_not_require_standard_readback(self, load, _path):
+        load.return_value = {
+            "acroname": {"enabled": False},
+            "monitors": [{"display_id": 1, "use_alt_addressing": True}],
+            "workstations": {"pc1": "", "pc2": ""},
+        }
+        controller = DeskControllerApp()
+        self.assertFalse(controller.monitor.verify_writes)
+        self.assertTrue(controller.monitor.use_alt_addressing)
 
     def test_monitor_routed_usb_commits_only_confirmed_monitor_input(self):
         controller = self.make_controller()
@@ -1159,6 +1175,38 @@ class HardwareDriverFailureTests(unittest.TestCase):
             text=True,
             timeout=5,
         )
+
+    @patch("desk_controller.pi_controller.drivers.monitor_ddc.time.sleep")
+    @patch("desk_controller.pi_controller.drivers.monitor_ddc.subprocess.run")
+    def test_monitor_only_ddc_write_ack_is_not_switch_confirmation(self, run, _sleep):
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        monitor = MonitorDDCController(verify_writes=True)
+        monitor.get_input_source = Mock(return_value=0x05)
+
+        self.assertFalse(monitor.set_input_source("0x06"))
+        self.assertEqual(monitor.get_input_source.call_count, 4)
+
+    @patch("desk_controller.pi_controller.drivers.monitor_ddc.time.sleep")
+    @patch("desk_controller.pi_controller.drivers.monitor_ddc.subprocess.run")
+    def test_monitor_only_rejects_unreadable_or_transient_target_echo(
+        self, run, _sleep
+    ):
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        monitor = MonitorDDCController(verify_writes=True)
+        monitor.get_input_source = Mock(side_effect=[None, 0x06, 0x05, 0x05])
+
+        self.assertFalse(monitor.set_input_source("0x06"))
+        self.assertEqual(monitor.get_input_source.call_count, 4)
+
+    @patch("desk_controller.pi_controller.drivers.monitor_ddc.time.sleep")
+    @patch("desk_controller.pi_controller.drivers.monitor_ddc.subprocess.run")
+    def test_monitor_only_waits_for_stable_new_input(self, run, _sleep):
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        monitor = MonitorDDCController(verify_writes=True)
+        monitor.get_input_source = Mock(side_effect=[0x05, 0x06, 0x06])
+
+        self.assertTrue(monitor.set_input_source("0x06"))
+        self.assertEqual(monitor.get_input_source.call_count, 3)
 
     def test_simulated_hub_exposes_and_controls_all_named_ports(self):
         hub = AcronameHubController(simulate=True)
