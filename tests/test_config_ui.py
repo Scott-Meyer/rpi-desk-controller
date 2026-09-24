@@ -71,6 +71,12 @@ audio_devices: {}
         self.restart = Mock()
         configure_config_ui(self.config_path, self.restart)
 
+    def test_legacy_disabled_acroname_is_shown_as_monitor_routed_usb(self):
+        stored = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        stored["acroname"]["enabled"] = False
+        self.config_path.write_text(yaml.safe_dump(stored), encoding="utf-8")
+        self.assertEqual(get_configuration()["usb_switch"]["driver"], "none")
+
     def test_connected_six_key_deck_reports_hardware_and_keeps_hidden_buttons(self):
         stored = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
         stored["streamdeck"]["buttons"] = {
@@ -363,6 +369,28 @@ audio_devices: {}
                     "off_service": "cover.open_cover",
                 }
             )
+
+    def test_six_key_one_way_actions_validate_scope_and_host(self):
+        for host in ("pc1", "pc2"):
+            button = StreamDeckButtonSettings.model_validate(
+                {"key": 0, "action_type": "kvm_select", "target": host}
+            )
+            self.assertEqual(button.target, host)
+        action = StreamDeckButtonSettings.model_validate(
+            {
+                "key": 2,
+                "action_type": "ha_state_action",
+                "state_entity": "cover.office_1,cover.office_2",
+                "state_attribute": "current_position",
+                "active_state": "0",
+                "service": "cover.set_cover_position",
+                "service_data": {
+                    "entity_id": ["cover.office_1", "cover.office_2"],
+                    "position": 0,
+                },
+            }
+        )
+        self.assertEqual(action.service, "cover.set_cover_position")
 
     def test_current_date_and_time_buttons_are_validated(self):
         time_button = StreamDeckButtonSettings.model_validate(

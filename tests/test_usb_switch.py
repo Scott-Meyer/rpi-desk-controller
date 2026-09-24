@@ -6,6 +6,7 @@ from desk_controller.pi_controller.drivers.acroname_hub import (
 )
 from desk_controller.pi_controller.drivers.usb_switch import (
     GPIOToggleUSBController,
+    MonitorOnlyUSBController,
     create_usb_controller,
 )
 
@@ -24,6 +25,14 @@ class USBControllerFactoryTests(unittest.TestCase):
 
         self.assertIsInstance(controller, AcronameHubController)
         self.assertEqual(controller.serial_number, 0x12345678)
+
+    def test_disabled_legacy_hub_uses_monitor_as_sole_switch(self):
+        controller = create_usb_controller(
+            {"acroname": {"enabled": False, "serial_number": 0}}
+        )
+        self.assertIsInstance(controller, MonitorOnlyUSBController)
+        self.assertTrue(controller.connect())
+        self.assertFalse(controller.get_hub_status()["capabilities"]["upstream_switch"])
 
     def test_ugreen_alias_builds_gpio_toggle_controller(self):
         controller = create_usb_controller(

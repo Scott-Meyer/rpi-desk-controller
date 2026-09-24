@@ -104,6 +104,7 @@
           <div class="grid">
             <label>Controller type
               <select id="usbSwitchDriver">
+                <option value="none">USB follows monitor (no separate hub)</option>
                 <option value="acroname">Acroname programmable hub</option>
                 <option value="ugreen_cm691_gpio">UGREEN CM691 via GPIO relay</option>
               </select>
@@ -122,6 +123,7 @@
             <label>PC 1 workstation ID<input id="workstationPc1" required></label>
             <label>PC 2 workstation ID<input id="workstationPc2" required></label>
           </div>
+          <p id="monitorUsbNote" class="note" hidden>Use this when changing the monitor input also moves keyboard and mouse USB. The monitor is the only switching hardware and must confirm the active input.</p>
           <p id="ugreenWiringNote" class="note" hidden>Use an isolated relay or optocoupler in parallel with the included desktop-controller button. Never connect the switch control cable directly to a Raspberry Pi GPIO. Without sentinel observation, the startup host must match the illuminated host and manual button presses cannot be detected.</p>
           <p id="sentinelNote" class="note" hidden>Choose one USB device that is always connected through the switch. Both workstation agents will watch for this VID/PID and optional serial number; the Pi commits a switch only after the target computer reports the sentinel present.</p>
 
@@ -270,13 +272,15 @@
                 <label>Action
                   <select id="buttonAction">
                     <option value="none">MQTT event only</option>
-                    <option value="kvm_toggle">Switch KVM host</option>
+                    <option value="kvm_toggle">Toggle KVM host</option>
+                    <option value="kvm_select">Select KVM host (pc1 or pc2)</option>
                     <option value="current_time">Show current time</option>
                     <option value="current_date">Show current date</option>
                     <option value="audio_output">Select audio output</option>
                     <option value="ha_scene">Activate HA scene</option>
                     <option value="ha_service">Call Home Assistant service</option>
                     <option value="ha_toggle">Toggle from Home Assistant state</option>
+                    <option value="ha_state_action">Request a Home Assistant state</option>
                     <option value="mqtt">Publish custom MQTT</option>
                     <option value="workstation_slot" hidden>Legacy computer slot</option>
                   </select>
@@ -294,10 +298,22 @@
                     <option value="earbuds">Microphone / earbuds</option>
                     <option value="bulb">Light bulb</option>
                     <option value="moon">Moon</option>
+                    <option value="snowflake">Snowflake</option>
                     <option value="sun">Sun</option>
                     <option value="shades_close">Shades closed</option>
                     <option value="shades_privacy">Shades privacy</option>
                     <option value="shades_extra_light">Shades extra light</option>
+                  </select>
+                </label>
+                <label id="haActiveIconField" hidden>Icon while active
+                  <select id="buttonActiveIcon">
+                    <option value="">Same icon</option>
+                    <option value="snowflake">Snowflake</option>
+                    <option value="moon">Moon</option>
+                    <option value="sun">Sun</option>
+                    <option value="shades_close">Shades closed</option>
+                    <option value="shades_extra_light">Shades open</option>
+                    <option value="none">None</option>
                   </select>
                 </label>
                 <label>Accent color<input id="buttonColor" type="color" value="#00c8ff"></label>
@@ -310,6 +326,7 @@
                 <label id="haStateEntityField">Observe entities (comma separated)<input id="buttonStateEntity" placeholder="cover.office_1,cover.office_2"></label>
                 <label id="haStateAttributeField">Observe attribute (blank for entity state)<input id="buttonStateAttribute" placeholder="fan_mode"></label>
                 <label id="haActiveStateField">Active value<input id="buttonActiveState" placeholder="0"></label>
+                <label id="haStateRequirementsField">Additional active-state attributes (JSON)<textarea id="buttonStateRequirements" rows="3" placeholder='{"state":"cool","temperature":70.5,"swing_mode":"off"}'></textarea></label>
                 <label id="haInactiveStateField">Inactive value (optional)<input id="buttonInactiveState" placeholder="100"></label>
                 <label id="haActiveLabelField">Label while active<input id="buttonActiveLabel" placeholder="OFFICE CLOSED"></label>
                 <label id="mqttTopicField">Custom MQTT topic<input id="buttonMqttTopic"></label>

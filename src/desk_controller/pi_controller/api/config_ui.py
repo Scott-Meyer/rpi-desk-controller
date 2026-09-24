@@ -15,7 +15,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from desk_controller import __version__, source_version
 from desk_controller.config import load_config, save_config
 from desk_controller.desktop_agent.updater import GitHubReleaseUpdater
-from desk_controller.pi_controller.ha_toggle import toggle_targets_observed
+from desk_controller.pi_controller.ha_toggle import (
+    action_targets_observed,
+    toggle_targets_observed,
+)
 from desk_controller.pi_controller.streamdeck_layout import (
     configured_streamdeck_buttons,
     configured_usb_ports,
@@ -157,7 +160,7 @@ class AcronameSettings(BaseModel):
 
 
 class USBSwitchSettings(BaseModel):
-    driver: Literal["acroname", "ugreen_cm691_gpio"] = "acroname"
+    driver: Literal["none", "acroname", "ugreen_cm691_gpio"] = "acroname"
     default_channel: int = Field(default=0, ge=0, le=1)
     gpio_pin: int = Field(default=17, ge=2, le=27)
     gpio_active_high: bool = False
@@ -255,6 +258,7 @@ class StreamDeckButtonSettings(BaseModel):
     enabled: bool = True
     label: str = Field(default="", max_length=128)
     icon: str = Field(default="headphones", max_length=64)
+    active_icon: str = Field(default="", max_length=64)
     accent_color: List[int] = Field(
         default_factory=lambda: [0, 200, 255],
         min_length=3,
@@ -264,12 +268,14 @@ class StreamDeckButtonSettings(BaseModel):
     action_type: Literal[
         "none",
         "kvm_toggle",
+        "kvm_select",
         "current_time",
         "current_date",
         "audio_output",
         "ha_scene",
         "ha_service",
         "ha_toggle",
+        "ha_state_action",
         "mqtt",
         "workstation_slot",
     ] = "none"
@@ -289,6 +295,7 @@ class StreamDeckButtonSettings(BaseModel):
     active_state: str = Field(default="", max_length=128)
     inactive_state: str = Field(default="", max_length=128)
     active_label: str = Field(default="", max_length=128)
+    state_requirements: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("accent_color")
     @classmethod
@@ -300,6 +307,7 @@ class StreamDeckButtonSettings(BaseModel):
     @field_validator(
         "label",
         "icon",
+        "active_icon",
         "group",
         "target",
         "off_target",
@@ -329,11 +337,13 @@ class StreamDeckButtonSettings(BaseModel):
     def validate_action(self):
         if not self.enabled:
             return self
+        if self.action_type == "kvm_select" and self.target not in {"pc1", "pc2"}:
+            raise ValueError("KVM select target must be pc1 or pc2")
         if self.action_type == "audio_output" and not self.target:
             raise ValueError("audio buttons require an output-device target")
         if self.action_type == "ha_scene" and not self.target.startswith("scene."):
             raise ValueError("Home Assistant scene targets must start with scene.")
-        if self.action_type in {"ha_service", "ha_toggle"}:
+        if self.action_type in {"ha_service", "ha_toggle", "ha_state_action"}:
             for service in (
                 (self.service, self.off_service)
                 if self.action_type == "ha_toggle"
@@ -344,7 +354,7 @@ class StreamDeckButtonSettings(BaseModel):
                     re.fullmatch(r"[a-z0-9_]+", part) for part in parts
                 ):
                     raise ValueError("Home Assistant services must use domain.service")
-        if self.action_type == "ha_toggle":
+        if self.action_type in {"ha_toggle", "ha_state_action"}:
             entities = [item.strip() for item in self.state_entity.split(",")]
             if (
                 not self.active_state
@@ -353,10 +363,17 @@ class StreamDeckButtonSettings(BaseModel):
                     re.fullmatch(r"[a-z0-9_]+\.[a-z0-9_]+", item) for item in entities
                 )
             ):
-                raise ValueError("HA toggle requires state entities and active state")
-            if not toggle_targets_observed(self.model_dump()):
                 raise ValueError(
-                    "HA toggle actions must target exactly the observed entities, "
+                    "HA state action requires state entities and active state"
+                )
+            scoped = (
+                toggle_targets_observed(self.model_dump())
+                if self.action_type == "ha_toggle"
+                else action_targets_observed(self.model_dump())
+            )
+            if not scoped:
+                raise ValueError(
+                    "HA state actions must target exactly the observed entities, "
                     "or provide explicit MQTT topic and payload"
                 )
         if self.action_type == "mqtt" and not self.mqtt_topic:
@@ -593,7 +610,12 @@ def _public_config() -> Dict:
             "default_channel": acroname.get("default_channel", 0),
         },
         "usb_switch": {
-            "driver": usb_switch.get("driver", "acroname"),
+            "driver": (
+                "none"
+                if usb_switch.get("driver", "acroname") == "acroname"
+                and acroname.get("enabled") is False
+                else usb_switch.get("driver", "acroname")
+            ),
             "default_channel": usb_switch.get(
                 "default_channel",
                 acroname.get("default_channel", 0),
@@ -701,6 +723,11 @@ def _save_update(payload: PiConfigurationUpdate) -> Path:
         config["hardware"] = payload.hardware.model_dump()
         config["kvm"] = payload.kvm.model_dump()
         config["acroname"] = {
+            "enabled": (
+                payload.usb_switch.driver == "acroname"
+                if payload.usb_switch is not None
+                else config.get("acroname", {}).get("enabled", True)
+            ),
             "serial_number": (
                 int(payload.acroname.serial_number, 0)
                 if payload.acroname.serial_number

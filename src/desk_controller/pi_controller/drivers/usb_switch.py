@@ -20,6 +20,56 @@ except ImportError:
     GPIOZERO_AVAILABLE = False
 
 
+class MonitorOnlyUSBController:
+    """Explicitly absent USB switching; the monitor is the KVM authority.
+
+    A legacy `acroname.enabled: false` means no hub is installed. Skipping USB
+    routing is deliberate, not a simulated or successful hardware switch.
+    """
+
+    PORT_COUNT = 0
+    MAX_CURRENT_LIMIT_MA = 0
+    DRIVER = "none"
+    MANUFACTURER = ""
+    MODEL = "No USB switch"
+    DISPLAY_NAME = "Monitor only (no USB switch)"
+    SUPPORTS_PORT_CONTROL = False
+    SUPPORTED_COMMANDS = ()
+
+    def connect(self) -> bool:
+        return True
+
+    def switch_upstream_channel(self, channel: int) -> bool:
+        return channel in (0, 1)
+
+    def get_hub_status(self, _port_names=None) -> Dict[str, Any]:
+        return {
+            "connected": False,
+            "driver": self.DRIVER,
+            "manufacturer": self.MANUFACTURER,
+            "model": self.MODEL,
+            "name": self.DISPLAY_NAME,
+            "serial_number": None,
+            "firmware_version": None,
+            "hardware_version": None,
+            "active_upstream": None,
+            "state_feedback": False,
+            "ports": [],
+            "capabilities": {
+                "upstream_switch": False,
+                "per_port_control": False,
+                "telemetry": False,
+                "state_feedback": False,
+            },
+        }
+
+    def set_name(self, _name: str) -> bool:
+        return False
+
+    def disconnect(self) -> None:
+        pass
+
+
 class GPIOToggleUSBController:
     """Drive a toggle-only USB sharing switch through a momentary contact.
 
@@ -231,6 +281,11 @@ def create_usb_controller(
         legacy_acroname = {}
 
     driver = str(switch_config.get("driver", "acroname")).strip().lower()
+    if driver == "none" or (
+        driver == "acroname" and legacy_acroname.get("enabled") is False
+    ):
+        return MonitorOnlyUSBController()
+
     if driver == "acroname":
         serial_number = switch_config.get(
             "serial_number",
@@ -254,4 +309,6 @@ def create_usb_controller(
             simulate=simulate,
         )
 
-    raise ValueError("usb_switch.driver must be 'acroname' or 'ugreen_cm691_gpio'")
+    raise ValueError(
+        "usb_switch.driver must be 'none', 'acroname' or 'ugreen_cm691_gpio'"
+    )

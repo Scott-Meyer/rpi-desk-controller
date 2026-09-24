@@ -437,6 +437,8 @@ input[type="color"] { padding: 4px; }
 
 .deck-key.active { border-color: var(--key-accent); }
 .deck-key.active::after { opacity: 1; }
+.deck-key.pending { border: 2px dashed #ffc400; }
+.deck-key.error { border: 2px solid #ff5555; }
 
 .deck-key.selected {
   border-color: var(--cyan);

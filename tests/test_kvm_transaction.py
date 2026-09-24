@@ -1,4 +1,5 @@
 import threading
+import time
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from desk_controller.core.workstation_slots import (
 )
 from desk_controller.pi_controller.drivers.acroname_hub import AcronameHubController
 from desk_controller.pi_controller.drivers.monitor_ddc import MonitorDDCController
+from desk_controller.pi_controller.drivers.usb_switch import MonitorOnlyUSBController
 from desk_controller.pi_controller.main import DeskControllerApp
 from desk_controller.pi_controller.workstation_deck import (
     SelectedWorkstationDeck,
@@ -91,6 +93,19 @@ class KVMTransactionTests(unittest.TestCase):
 
         controller._handle_key_press(0)
 
+        controller._start_kvm_switch.assert_called_once_with(1)
+
+    def test_explicit_pc_keys_do_not_toggle_an_already_selected_host(self):
+        controller = self.make_controller()
+        controller._start_kvm_switch = Mock(return_value=True)
+        controller.buttons = {
+            0: {"enabled": True, "action_type": "kvm_select", "target": "pc1"},
+            3: {"enabled": True, "action_type": "kvm_select", "target": "pc2"},
+        }
+
+        controller._handle_key_press(0)
+        controller._start_kvm_switch.assert_not_called()
+        controller._handle_key_press(3)
         controller._start_kvm_switch.assert_called_once_with(1)
 
     def test_repeated_kvm_key_presses_do_not_queue_up(self):
@@ -524,6 +539,30 @@ class KVMTransactionTests(unittest.TestCase):
             controller.mqtt.publish.call_args_list,
         )
 
+    def test_monitor_routed_usb_commits_only_confirmed_monitor_input(self):
+        controller = self.make_controller()
+        controller.acroname = MonitorOnlyUSBController()
+        controller.monitor.get_input_source.return_value = 0x11
+        controller.monitor.set_input_source.return_value = False
+
+        self.assertTrue(controller._initialize_kvm_state())
+        self.assertEqual(controller.current_pc, 1)
+        self.assertFalse(controller.kvm_fault)
+        self.assertFalse(controller._switch_kvm(0))
+        self.assertEqual(controller.current_pc, 1)
+        self.assertTrue(controller.kvm_fault)
+
+    def test_monitor_routed_usb_refuses_unobserved_startup(self):
+        for monitor_input in (None, 0x99):
+            with self.subTest(monitor_input=monitor_input):
+                controller = self.make_controller()
+                controller.acroname = MonitorOnlyUSBController()
+                controller.monitor.get_input_source.return_value = monitor_input
+
+                self.assertFalse(controller._initialize_kvm_state())
+                self.assertTrue(controller.kvm_fault)
+                self.assertEqual(controller.current_pc, 0)
+
     def test_startup_routes_usb_to_host_selected_on_monitor(self):
         controller = self.make_controller()
         controller.monitor.get_input_source.return_value = 0x11
@@ -876,6 +915,8 @@ class KVMTransactionTests(unittest.TestCase):
         controller = self.make_controller()
         controller._ha_toggle_states = {}
         controller._ha_toggle_in_flight = set()
+        controller._ha_toggle_pending = {}
+        controller._ha_toggle_failures = set()
         controller._ha_toggle_lock = threading.RLock()
         controller._last_ha_toggle_poll = 0.0
         controller._start_kvm_switch = Mock(return_value=True)
@@ -904,6 +945,12 @@ class KVMTransactionTests(unittest.TestCase):
             unblock.wait(2)
             return {"state": "open"}
 
+        controller.buttons[2] = {
+            **controller.buttons[1],
+            "action_type": "ha_state_action",
+            "service": "cover.open_cover",
+            "service_data": {"entity_id": ["cover.office_1", "cover.office_2"]},
+        }
         controller.ha.get_state.side_effect = slow_state
         controller.ha.call_service.return_value = True
         controller._publish_streamdeck_state.side_effect = (
@@ -915,6 +962,9 @@ class KVMTransactionTests(unittest.TestCase):
             controller._handle_key_press(0)
             controller._start_kvm_switch.assert_called_once_with(1)
             controller._handle_key_press(1)
+            controller._handle_key_press(
+                2
+            )  # Opposite request cannot overtake pending work.
             self.assertEqual(controller.ha.get_state.call_count, 1)
         finally:
             unblock.set()
@@ -923,6 +973,42 @@ class KVMTransactionTests(unittest.TestCase):
             "cover.close_cover", "", controller.buttons[1]["service_data"]
         )
         self.assertEqual(controller._ha_toggle_states[1], "inactive")
+
+    def test_ha_pending_stays_until_device_reaches_requested_state(self):
+        controller = self.make_controller()
+        controller.homeassistant_enabled = True
+        controller._ha_toggle_lock = threading.RLock()
+        controller._ha_toggle_states = {1: "inactive"}
+        controller._ha_toggle_failures = set()
+        controller._ha_toggle_pending = {
+            "climate.air_conditioner_air_conditioner": {
+                "key": 1,
+                "target": "active",
+                "deadline": time.monotonic() + 30,
+            }
+        }
+        controller.physical_buttons = {
+            1: {
+                "action_type": "ha_state_action",
+                "enabled": True,
+                "state_entity": "climate.air_conditioner_air_conditioner",
+                "state_attribute": "fan_mode",
+                "active_state": "silent",
+                "service": "mqtt.publish",
+                "service_data": {"topic": "sean_ac/cmd/preset", "payload": "sleep"},
+            }
+        }
+        controller.ha.get_state.return_value = {
+            "state": "cool",
+            "attributes": {"fan_mode": "turbo"},
+        }
+        self.assertFalse(controller._refresh_ha_toggles())
+        self.assertTrue(controller._ha_toggle_pending)
+
+        controller.ha.get_state.return_value["attributes"]["fan_mode"] = "silent"
+        self.assertTrue(controller._refresh_ha_toggles())
+        self.assertFalse(controller._ha_toggle_pending)
+        self.assertEqual(controller._ha_toggle_states[1], "active")
 
     def test_home_assistant_discovery_covers_every_physical_key(self):
         controller = self.make_controller()

@@ -1,8 +1,21 @@
 """State-observed two-way Home Assistant controls for Stream Deck buttons."""
 
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 from desk_controller.pi_controller.integrations.homeassistant import HomeAssistantClient
+
+
+def _same_state_value(actual: Any, expected: Any) -> bool:
+    """Match an integer/float sensor value without changing text semantics."""
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return actual == expected
+    if isinstance(actual, (int, float)) or isinstance(expected, (int, float)):
+        try:
+            return Decimal(str(actual)) == Decimal(str(expected))
+        except InvalidOperation:
+            return False
+    return str(actual) == str(expected)
 
 
 def read_toggle_state(button: Mapping[str, Any], ha: HomeAssistantClient) -> str:
@@ -16,10 +29,15 @@ def read_toggle_state(button: Mapping[str, Any], ha: HomeAssistantClient) -> str
     ]
     if not entities or not all(entities) or not button.get("active_state"):
         return "unavailable"
-    if not toggle_targets_observed(button):
+    if not (
+        action_targets_observed(button)
+        if button.get("action_type") == "ha_state_action"
+        else toggle_targets_observed(button)
+    ):
         return "unavailable"
 
     states = []
+    active_matches = []
     for entity in entities:
         result = ha.get_state(entity)
         if not isinstance(result, dict) or result.get("state") in (
@@ -38,55 +56,83 @@ def read_toggle_state(button: Mapping[str, Any], ha: HomeAssistantClient) -> str
         )
         if value is None:
             return "unavailable"
-        states.append(str(value))
+        states.append(value)
+        requirements = button.get("state_requirements", {})
+        if not isinstance(requirements, dict):
+            return "unavailable"
+        active_matches.append(
+            _same_state_value(value, button["active_state"])
+            and all(
+                _same_state_value(
+                    result["state"]
+                    if key == "state"
+                    else result.get("attributes", {}).get(key),
+                    expected,
+                )
+                for key, expected in requirements.items()
+            )
+        )
 
-    if all(value == str(button["active_state"]) for value in states):
+    if all(active_matches):
         return "active"
-    inactive = str(button.get("inactive_state", ""))
-    if inactive and all(value == inactive for value in states):
+    inactive = button.get("inactive_state", "")
+    if inactive != "" and all(_same_state_value(value, inactive) for value in states):
         return "inactive"
-    if len(set(states)) > 1:
+    if len({str(value) for value in states}) > 1:
         return "mixed"
     return "other" if inactive else "inactive"
 
 
-def toggle_targets_observed(button: Mapping[str, Any]) -> bool:
-    """Reject HA actions that might reach more than the observed entities."""
+def action_targets_observed(button: Mapping[str, Any], prefix: str = "") -> bool:
+    """Reject an HA action that might reach more than the observed entities."""
     observed = {
         entity.strip() for entity in str(button.get("state_entity", "")).split(",")
     }
     if not observed or "" in observed:
         return False
-    for prefix in ("", "off_"):
-        service = str(button.get(f"{prefix}service", ""))
-        data = button.get(f"{prefix}service_data", {})
-        if not isinstance(data, dict):
-            return False
-        if service == "mqtt.publish":
-            if not data.get("topic") or not data.get("payload"):
-                return False
-            continue
-        if any(
-            selector in data
-            for selector in ("area_id", "device_id", "floor_id", "label_id", "target")
-        ):
-            return False
-        # call_service uses setdefault, so an explicit null/empty entity_id
-        # must not be treated as if it would fall back to the button target.
-        raw_targets = (
-            data["entity_id"] if "entity_id" in data else button.get("target", "")
-        )
-        if isinstance(raw_targets, str):
-            targets = {value.strip() for value in raw_targets.split(",")}
-        elif isinstance(raw_targets, list) and all(
-            isinstance(value, str) for value in raw_targets
-        ):
-            targets = set(raw_targets)
-        else:
-            return False
-        if targets != observed:
-            return False
-    return True
+    service = str(button.get(f"{prefix}service", ""))
+    data = button.get(f"{prefix}service_data", {})
+    if not isinstance(data, dict):
+        return False
+    if service == "mqtt.publish":
+        return bool(data.get("topic") and data.get("payload"))
+    if any(
+        selector in data
+        for selector in ("area_id", "device_id", "floor_id", "label_id", "target")
+    ):
+        return False
+    # call_service uses setdefault: explicit null/empty entity_id must fail.
+    raw_targets = data["entity_id"] if "entity_id" in data else button.get("target", "")
+    if isinstance(raw_targets, str):
+        targets = {value.strip() for value in raw_targets.split(",")}
+    elif isinstance(raw_targets, list) and all(
+        isinstance(value, str) for value in raw_targets
+    ):
+        targets = set(raw_targets)
+    else:
+        return False
+    return targets == observed
+
+
+def toggle_targets_observed(button: Mapping[str, Any]) -> bool:
+    return action_targets_observed(button) and action_targets_observed(button, "off_")
+
+
+def press_state_action(
+    button: Mapping[str, Any], ha: HomeAssistantClient
+) -> tuple[bool, str]:
+    """Request one state, without reversing it on a repeated press."""
+    state = read_toggle_state(button, ha)
+    if state in ("unavailable", "moving"):
+        return False, state
+    if state == "active":
+        return True, state
+    success = ha.call_service(
+        str(button.get("service", "")),
+        str(button.get("target", "")),
+        button.get("service_data", {}),
+    )
+    return success, state
 
 
 def press_toggle(

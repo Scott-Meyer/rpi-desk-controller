@@ -9,6 +9,7 @@ const buttonFields = {
   action_type: byId("buttonAction"),
   slot_id: byId("buttonSlotId"),
   icon: byId("buttonIcon"),
+  active_icon: byId("buttonActiveIcon"),
   accent_color: byId("buttonColor"),
   target: byId("buttonTarget"),
   off_target: byId("buttonOffTarget"),
@@ -25,11 +26,16 @@ const buttonFields = {
   active_state: byId("buttonActiveState"),
   inactive_state: byId("buttonInactiveState"),
   active_label: byId("buttonActiveLabel"),
+  state_requirements: byId("buttonStateRequirements"),
 };
 
 let buttons = new Map();
 let selectedKey = 0;
 let liveToggleStates = {};
+let liveTogglePending = {};
+let liveToggleFailures = new Set();
+let liveKvmHost = null;
+let liveKvmFault = false;
 let hubLoading = false;
 let connectionStatusLoading = false;
 let externalMqttPort = 1883;
@@ -41,6 +47,7 @@ const blankButton = (key) => ({
   enabled: false,
   label: "",
   icon: "none",
+  active_icon: "",
   accent_color: [0, 200, 255],
   group: "",
   action_type: "none",
@@ -60,6 +67,7 @@ const blankButton = (key) => ({
     active_state: "",
     inactive_state: "",
     active_label: "",
+    state_requirements: {},
 });
 
 const portRow = (index) => {
@@ -199,6 +207,10 @@ function setConnectionHealth(id, stateId, detailId, state, detail, healthy) {
 
 function renderConnectionStatus(status) {
   liveToggleStates = status.ha_toggles || {};
+  liveTogglePending = status.ha_pending || {};
+  liveToggleFailures = new Set(status.ha_failures || []);
+  liveKvmHost = status.active_host || null;
+  liveKvmFault = Boolean(status.kvm_fault);
   renderDeck();
   const mqtt = status.mqtt;
   setConnectionHealth(
@@ -413,16 +425,24 @@ function renderDeck() {
       current_time: "Current time",
       current_date: "Current date",
     }[button.action_type];
-    const toggleState = button.action_type === "ha_toggle" ? liveToggleStates[key] : null;
-    const label = button.enabled
+    const observed = ["ha_toggle", "ha_state_action"].includes(button.action_type);
+    const toggleState = observed ? liveToggleStates[key] : null;
+    const pending = observed ? liveTogglePending[key] : null;
+    const failed = observed && liveToggleFailures.has(key);
+    let label = button.enabled
       ? (toggleState === "active" ? (button.active_label || button.label)
-        : toggleState === "unavailable" ? "UNAVAILABLE"
-        : toggleState === "moving" ? "MOVING"
-        : toggleState === "other" ? "PARTIAL / CUSTOM"
-        : toggleState === "mixed" ? "MIXED"
+        : toggleState === "unavailable" && button.action_type === "ha_toggle" ? "UNAVAILABLE"
+        : toggleState === "moving" && button.action_type === "ha_toggle" ? "MOVING"
+        : toggleState === "other" && button.action_type === "ha_toggle" ? "PARTIAL / CUSTOM"
+        : toggleState === "mixed" && button.action_type === "ha_toggle" ? "MIXED"
         : (dynamicLabel || button.label || "Empty"))
       : "Empty";
-    element.classList.toggle("active", toggleState === "active");
+    if (pending) label = `${pending === "active" ? (button.active_label || button.label) : button.label}…`;
+    else if (failed) label = "Not confirmed";
+    element.classList.toggle("active", toggleState === "active"
+      || (button.action_type === "kvm_select" && !liveKvmFault && button.target === liveKvmHost));
+    element.classList.toggle("pending", Boolean(pending));
+    element.classList.toggle("error", Boolean(failed && !pending));
     const position = document.createElement("span");
     position.className = "deck-position";
     position.textContent = key + 1;
@@ -444,6 +464,8 @@ function configureActionFields() {
     ha_scene: "Home Assistant scene",
     ha_service: "Home Assistant entity (optional)",
     ha_toggle: "Home Assistant entity (optional)",
+    ha_state_action: "Home Assistant entity (optional)",
+    kvm_select: "KVM target (pc1 or pc2)",
     mqtt: "Optional action target",
     current_time: "Action target",
     current_date: "Action target",
@@ -452,11 +474,15 @@ function configureActionFields() {
     workstation_slot: "Action target",
   };
   byId("targetField").firstChild.textContent = labels[action] || "Action target";
-  byId("targetField").hidden = !["audio_output", "ha_scene", "ha_service", "ha_toggle"].includes(action);
+  byId("targetField").hidden = !["audio_output", "ha_scene", "ha_service", "ha_toggle", "ha_state_action", "kvm_select"].includes(action);
   byId("offTargetField").hidden = action !== "ha_scene";
-  byId("haServiceField").hidden = !["ha_service", "ha_toggle"].includes(action);
-  byId("haServiceDataField").hidden = !["ha_service", "ha_toggle"].includes(action);
-  for (const id of ["haOffServiceField", "haOffServiceDataField", "haStateEntityField", "haStateAttributeField", "haActiveStateField", "haInactiveStateField", "haActiveLabelField"]) {
+  const observedAction = ["ha_toggle", "ha_state_action"].includes(action);
+  byId("haServiceField").hidden = !["ha_service", "ha_toggle", "ha_state_action"].includes(action);
+  byId("haServiceDataField").hidden = !["ha_service", "ha_toggle", "ha_state_action"].includes(action);
+  for (const id of ["haStateEntityField", "haStateAttributeField", "haActiveStateField", "haInactiveStateField", "haStateRequirementsField", "haActiveLabelField", "haActiveIconField"]) {
+    byId(id).hidden = !observedAction;
+  }
+  for (const id of ["haOffServiceField", "haOffServiceDataField"]) {
     byId(id).hidden = action !== "ha_toggle";
   }
   byId("haServiceField").firstChild.textContent = action === "ha_toggle" ? "Service when inactive" : "Home Assistant service";
@@ -482,6 +508,7 @@ function selectKey(key) {
   buttonFields.action_type.value = button.action_type;
   buttonFields.slot_id.value = button.slot_id;
   buttonFields.icon.value = button.icon;
+  buttonFields.active_icon.value = button.active_icon || "";
   buttonFields.accent_color.value = rgbToHex(button.accent_color);
   buttonFields.target.value = button.target;
   buttonFields.off_target.value = button.off_target;
@@ -502,6 +529,8 @@ function selectKey(key) {
   buttonFields.active_state.value = button.active_state || "";
   buttonFields.inactive_state.value = button.inactive_state || "";
   buttonFields.active_label.value = button.active_label || "";
+  buttonFields.state_requirements.value = Object.keys(button.state_requirements || {}).length
+    ? JSON.stringify(button.state_requirements, null, 2) : "";
   configureActionFields();
   renderDeck();
 }
@@ -525,6 +554,12 @@ function updateSelectedButton() {
       offServiceData = offServiceDataText;
     }
   }
+  let stateRequirements = {};
+  const requirementsText = buttonFields.state_requirements.value.trim();
+  if (requirementsText) {
+    try { stateRequirements = JSON.parse(requirementsText); }
+    catch (_error) { stateRequirements = requirementsText; }
+  }
   const button = {
     key: selectedKey,
     enabled: buttonFields.enabled.checked,
@@ -533,6 +568,7 @@ function updateSelectedButton() {
     action_type: buttonFields.action_type.value,
     slot_id: buttonFields.slot_id.value,
     icon: buttonFields.icon.value,
+    active_icon: buttonFields.active_icon.value,
     accent_color: hexToRgb(buttonFields.accent_color.value),
     target: buttonFields.target.value,
     off_target: buttonFields.off_target.value,
@@ -549,6 +585,7 @@ function updateSelectedButton() {
     active_state: buttonFields.active_state.value,
     inactive_state: buttonFields.inactive_state.value,
     active_label: buttonFields.active_label.value,
+    state_requirements: stateRequirements,
   };
   buttons.set(selectedKey, button);
   configureActionFields();
@@ -762,8 +799,10 @@ function syncConnectionFields() {
 }
 
 function syncUsbSwitchFields() {
-  const isUgreen = byId("usbSwitchDriver").value === "ugreen_cm691_gpio";
-  byId("acronameSerialField").hidden = isUgreen;
+  const driver = byId("usbSwitchDriver").value;
+  const isUgreen = driver === "ugreen_cm691_gpio";
+  byId("acronameSerialField").hidden = driver !== "acroname";
+  byId("monitorUsbNote").hidden = driver !== "none";
   document.querySelectorAll(".ugreen-setting").forEach((field) => {
     field.hidden = !isUgreen;
   });

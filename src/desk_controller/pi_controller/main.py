@@ -56,7 +56,11 @@ from desk_controller.pi_controller.drivers.streamdeck_mgr import StreamDeckManag
 from desk_controller.pi_controller.drivers.usb_switch import (
     create_usb_controller,
 )
-from desk_controller.pi_controller.ha_toggle import press_toggle, read_toggle_state
+from desk_controller.pi_controller.ha_toggle import (
+    press_state_action,
+    press_toggle,
+    read_toggle_state,
+)
 from desk_controller.pi_controller.integrations.homeassistant import HomeAssistantClient
 from desk_controller.pi_controller.streamdeck_layout import (
     DYNAMIC_DATETIME_ACTIONS,
@@ -190,7 +194,9 @@ class DeskControllerApp:
         self._audio_state_by_host: Dict[str, str] = {}
         self.active_groups: Dict[str, int] = {}
         self._ha_toggle_states: Dict[int, str] = {}
-        self._ha_toggle_in_flight: set[int] = set()
+        self._ha_toggle_in_flight: set[str] = set()
+        self._ha_toggle_pending: Dict[str, Dict[str, Any]] = {}
+        self._ha_toggle_failures: set[int] = set()
         self._ha_toggle_lock = threading.RLock()
         self._last_ha_toggle_poll = 0.0
         self._clock_display_minute: Optional[str] = None
@@ -281,6 +287,12 @@ class DeskControllerApp:
             },
             "homeassistant": homeassistant_status,
             "ha_toggles": dict(getattr(self, "_ha_toggle_states", {})),
+            "ha_pending": self._ha_pending_keys(),
+            "ha_failures": list(getattr(self, "_ha_toggle_failures", set())),
+            "active_host": (
+                f"pc{self.current_pc + 1}" if hasattr(self, "current_pc") else None
+            ),
+            "kvm_fault": getattr(self, "kvm_fault", False),
         }
 
     def _request_restart(self):
@@ -1173,7 +1185,17 @@ class DeskControllerApp:
         )
 
         mismatch_detected = False
+        monitor_routes_usb = (
+            usb_owner == "pi" and getattr(self.acroname, "DRIVER", "") == "none"
+        )
         if input_source is None:
+            if monitor_routes_usb:
+                self.kvm_fault = True
+                logger.error(
+                    "Monitor routes USB but its current input could not be read; "
+                    "refusing to assume the active host"
+                )
+                return False
             logger.info(
                 "Monitor input unavailable; using %s host PC%s",
                 "the observed USB state"
@@ -1199,6 +1221,13 @@ class DeskControllerApp:
                 None,
             )
             if matching_pc is None:
+                if monitor_routes_usb:
+                    self.kvm_fault = True
+                    logger.error(
+                        "Monitor routes USB but input 0x%02x maps to neither host",
+                        input_source,
+                    )
+                    return False
                 logger.warning(
                     "Monitor input 0x%02x does not map to a configured host; "
                     "using %s host PC%s",
@@ -1279,6 +1308,12 @@ class DeskControllerApp:
             target_pc_index,
             transaction_id,
         ):
+            if usb_owner == "pi" and getattr(self.acroname, "DRIVER", "") == "none":
+                self._set_kvm_fault(
+                    "Monitor did not confirm the input change; no USB switch "
+                    "was configured and the active host was not changed"
+                )
+                return False
             # Don't roll back the USB switch here: keyboard/mouse control is
             # often more valuable to a guest than the video, and a monitor
             # step commonly fails simply because the target owner's desktop
@@ -1711,6 +1746,8 @@ class DeskControllerApp:
             {
                 "active_groups": self.active_groups,
                 "ha_toggles": dict(getattr(self, "_ha_toggle_states", {})),
+                "ha_pending": self._ha_pending_keys(),
+                "ha_failures": list(getattr(self, "_ha_toggle_failures", set())),
                 "active_audio_device": self.active_audio_device or None,
                 "active_host": f"PC{self.current_pc + 1}",
                 "active_workstation": workstation_state,
@@ -1833,7 +1870,11 @@ class DeskControllerApp:
             status["desired_upstream"] = self.current_pc
             status["observed_upstream"] = observed
             status["sync_status"] = (
-                "synced" if observed == self.current_pc else "diverged"
+                "not_applicable"
+                if driver == "none"
+                else "synced"
+                if observed == self.current_pc
+                else "diverged"
             )
         return status
 
@@ -2019,33 +2060,81 @@ class DeskControllerApp:
             self._update_sd_keys()
             self._publish_streamdeck_state()
 
+    @staticmethod
+    def _ha_state_group(button: Dict[str, Any]) -> str:
+        """Opposite keys observing the same HA entities share a pending command."""
+        return ",".join(
+            sorted(
+                entity.strip()
+                for entity in str(button.get("state_entity", "")).split(",")
+            )
+        )
+
+    def _ha_pending_keys(self) -> Dict[int, str]:
+        lock = getattr(self, "_ha_toggle_lock", None)
+        if lock is None:
+            return {}
+        with lock:
+            return {
+                item["key"]: item.get("target", "requesting")
+                for item in self._ha_toggle_pending.values()
+            }
+
     def _start_ha_toggle(self, key: int, button: Dict[str, Any]) -> bool:
         """Keep HA network I/O off the Stream Deck's input-reader thread."""
+        group = self._ha_state_group(button)
         with self._ha_toggle_lock:
-            if key in self._ha_toggle_in_flight:
+            if group in self._ha_toggle_in_flight or group in self._ha_toggle_pending:
+                logger.info(
+                    "Ignoring key %s while an HA request for %s is pending", key, group
+                )
                 return False
-            self._ha_toggle_in_flight.add(key)
+            self._ha_toggle_in_flight.add(group)
+            self._ha_toggle_pending[group] = {
+                "key": key,
+                "target": "requesting",
+                "deadline": time.monotonic() + 45,
+            }
+            self._ha_toggle_failures.discard(key)
 
         def run():
             try:
-                success, observed_state = press_toggle(button, self.ha)
+                one_way = button.get("action_type") == "ha_state_action"
+                success, observed_state = (
+                    press_state_action(button, self.ha)
+                    if one_way
+                    else press_toggle(button, self.ha)
+                )
                 self._ha_toggle_states[key] = observed_state
+                with self._ha_toggle_lock:
+                    if not success or (one_way and observed_state == "active"):
+                        self._ha_toggle_pending.pop(group, None)
+                        if not success:
+                            self._ha_toggle_failures.add(key)
+                    else:
+                        self._ha_toggle_pending[group]["target"] = (
+                            "inactive"
+                            if not one_way and observed_state == "active"
+                            else "active"
+                        )
                 if not success:
-                    logger.warning(
-                        "Home Assistant toggle on key %s was not accepted", key
-                    )
+                    logger.warning("Home Assistant state request on key %s failed", key)
             except Exception:
-                logger.exception("Home Assistant toggle on key %s failed", key)
+                logger.exception("Home Assistant state request on key %s failed", key)
+                with self._ha_toggle_lock:
+                    self._ha_toggle_pending.pop(group, None)
+                    self._ha_toggle_failures.add(key)
             finally:
                 with self._ha_toggle_lock:
-                    self._ha_toggle_in_flight.discard(key)
+                    self._ha_toggle_in_flight.discard(group)
                 self._last_ha_toggle_poll = 0.0
                 self._update_sd_keys()
                 self._publish_streamdeck_state()
 
-        worker = threading.Thread(target=run, name=f"ha-toggle-{key}", daemon=True)
+        worker = threading.Thread(target=run, name=f"ha-state-{key}", daemon=True)
         worker.start()
         self._update_sd_keys()
+        self._publish_streamdeck_state()
         return True
 
     def _handle_key_press(self, key: int):
@@ -2070,6 +2159,15 @@ class DeskControllerApp:
             # slow/unreachable remote agent can't make the physical button
             # feel unresponsive or cause repeated presses to queue up.
             action_succeeded = self._start_kvm_switch(next_pc)
+
+        elif action_type == "kvm_select":
+            requested_pc = 0 if target == "pc1" else 1 if target == "pc2" else None
+            if requested_pc is None:
+                logger.error("Invalid direct KVM target on key %s", key)
+            elif requested_pc == self.current_pc and not self.kvm_fault:
+                action_succeeded = True
+            else:
+                action_succeeded = self._start_kvm_switch(requested_pc)
 
         elif action_type == "audio_output":
             if self.kvm_fault:
@@ -2101,7 +2199,7 @@ class DeskControllerApp:
                 if action_succeeded and group:
                     self.active_groups[group] = key
 
-        elif action_type == "ha_toggle":
+        elif action_type in {"ha_toggle", "ha_state_action"}:
             if not getattr(self, "homeassistant_enabled", True):
                 logger.warning("Ignoring Home Assistant toggle: integration disabled")
             else:
@@ -2162,6 +2260,8 @@ class DeskControllerApp:
                 "ha_scene",
                 "ha_service",
                 "ha_toggle",
+                "ha_state_action",
+                "kvm_select",
                 "mqtt",
                 "workstation_slot",
                 *DYNAMIC_DATETIME_ACTIONS,
@@ -2222,31 +2322,60 @@ class DeskControllerApp:
                 active = self.kvm_fault
                 if self.kvm_fault:
                     color = (255, 60, 60)
+            elif action_type == "kvm_select":
+                is_pending = bool(getattr(self, "_kvm_switch_in_flight", False))
+                active = (
+                    not self.kvm_fault
+                    and str(button.get("target")) == f"pc{self.current_pc + 1}"
+                )
+                if self.kvm_fault:
+                    color = (255, 60, 60)
             elif action_type == "workstation_slot":
                 is_available = bool(
                     button.get("_agent_online") and button.get("_slot_configured")
                 )
                 active = bool(button.get("_slot_active") and is_available)
-            elif action_type == "ha_toggle":
-                is_pending = key in getattr(self, "_ha_toggle_in_flight", set())
+            elif action_type in {"ha_toggle", "ha_state_action"}:
                 state = getattr(self, "_ha_toggle_states", {}).get(key, "unavailable")
-                is_available = state != "unavailable"
+                pending = self._ha_pending_keys().get(key)
+                failed = key in getattr(self, "_ha_toggle_failures", set())
+                is_pending = bool(pending)
+                is_available = state != "unavailable" or is_pending
                 active = state == "active"
-                if state == "active":
+                if active:
                     label = str(button.get("active_label") or label)
-                elif state == "mixed":
-                    label = "MIXED"
-                elif state == "moving":
-                    label = "MOVING"
-                elif state == "other":
-                    label = "PARTIAL\nCUSTOM"
-                elif state == "unavailable":
-                    label = "UNAVAILABLE"
+                elif action_type == "ha_toggle":
+                    if state == "mixed":
+                        label = "MIXED"
+                    elif state == "moving":
+                        label = "MOVING"
+                    elif state == "other":
+                        label = "PARTIAL\nCUSTOM"
+                    elif state == "unavailable":
+                        label = "UNAVAILABLE"
+                if is_pending:
+                    desired_label = (
+                        button.get("active_label")
+                        if pending == "active"
+                        else button.get("label")
+                    ) or button.get("label", "")
+                    label = f"{desired_label}..."
+                elif failed:
+                    label = "NOT\nCONFIRMED"
 
             self.streamdeck.render_scene_key(
                 key=key,
                 label=label,
-                icon_type=str(button.get("icon", "none")),
+                icon_type=str(
+                    button.get("active_icon")
+                    if active and button.get("active_icon")
+                    else button.get("icon", "none")
+                ),
+                has_error=bool(
+                    action_type in {"ha_toggle", "ha_state_action"}
+                    and not is_pending
+                    and key in getattr(self, "_ha_toggle_failures", set())
+                ),
                 is_active=active,
                 accent_color=color,
                 host_num=self.current_pc + 1,
@@ -2263,10 +2392,27 @@ class DeskControllerApp:
             return False
         changed = False
         for key, button in self.physical_buttons.items():
-            if button.get("enabled", True) and button.get("action_type") == "ha_toggle":
+            if button.get("enabled", True) and button.get("action_type") in {
+                "ha_toggle",
+                "ha_state_action",
+            }:
                 state = read_toggle_state(button, self.ha)
                 if self._ha_toggle_states.get(key) != state:
                     self._ha_toggle_states[key] = state
+                    changed = True
+        with self._ha_toggle_lock:
+            for group, item in list(self._ha_toggle_pending.items()):
+                if item["target"] == "requesting":
+                    continue
+                key = item["key"]
+                if self._ha_toggle_states.get(key) == item["target"]:
+                    self._ha_toggle_pending.pop(group)
+                    self._ha_toggle_failures.discard(key)
+                    changed = True
+                elif time.monotonic() >= item["deadline"]:
+                    logger.warning("HA state request on key %s was not confirmed", key)
+                    self._ha_toggle_pending.pop(group)
+                    self._ha_toggle_failures.add(key)
                     changed = True
         if changed:
             self._update_sd_keys()
@@ -2386,7 +2532,8 @@ class DeskControllerApp:
 
         try:
             while not self._stop_event.is_set():
-                if time.monotonic() - self._last_ha_toggle_poll >= 10:
+                poll_interval = 2 if self._ha_toggle_pending else 10
+                if time.monotonic() - self._last_ha_toggle_poll >= poll_interval:
                     self._last_ha_toggle_poll = time.monotonic()
                     self._refresh_ha_toggles()
                 self._refresh_datetime_buttons()

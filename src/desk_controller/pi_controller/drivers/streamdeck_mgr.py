@@ -104,6 +104,32 @@ class StreamDeckManager:
             fill=bg_color,
         )
 
+    def _draw_snowflake_icon(
+        self, draw: ImageDraw.ImageDraw, cx: int, cy: int, color: tuple
+    ):
+        """Draw a six-point snowflake for the cold AC preset."""
+        for angle in range(0, 360, 60):
+            radians = math.radians(angle)
+            dx, dy = math.cos(radians), math.sin(radians)
+            draw.line(
+                [cx, cy, cx + round(15 * dx), cy + round(15 * dy)],
+                fill=color,
+                width=3,
+            )
+            for side in (-1, 1):
+                x, y = cx + 10 * dx, cy + 10 * dy
+                branch = radians + side * math.pi * 3 / 4
+                draw.line(
+                    [
+                        round(x),
+                        round(y),
+                        round(x + 5 * math.cos(branch)),
+                        round(y + 5 * math.sin(branch)),
+                    ],
+                    fill=color,
+                    width=2,
+                )
+
     def _draw_bulb_icon(
         self, draw: ImageDraw.ImageDraw, cx: int, cy: int, r: int, color: tuple
     ):
@@ -478,6 +504,7 @@ class StreamDeckManager:
         host_num: int = 1,
         is_available=None,
         is_pending: bool = False,
+        has_error: bool = False,
         display_style: str = "button",
     ):
         """Renders key image with PIL vector graphics and dynamic glowing states."""
@@ -530,6 +557,11 @@ class StreamDeckManager:
             icon_color = (130, 130, 145)
             text_color = (120, 120, 130)
 
+        if has_error:
+            draw.rectangle(
+                [2, 2, width - 3, height - 3], outline=(255, 70, 70), width=3
+            )
+
         if is_pending:
             self._draw_dotted_border(
                 draw,
@@ -555,6 +587,8 @@ class StreamDeckManager:
                 self._draw_sun_icon(content_draw, cx, cy, 10, icon_color)
             elif icon_type == "moon":
                 self._draw_moon_icon(content_draw, cx, cy, 11, icon_color, bg_color)
+            elif icon_type == "snowflake":
+                self._draw_snowflake_icon(content_draw, cx, cy, icon_color)
             elif icon_type == "bulb":
                 self._draw_bulb_icon(content_draw, cx, cy, 10, icon_color)
             elif icon_type == "speakers":

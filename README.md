@@ -128,8 +128,10 @@ usb_switch:
 ```
 
 `acroname` is the default and retains full upstream selection, eight-port
-control, device discovery, and electrical telemetry. Existing configurations
-that contain only the legacy `acroname` section continue to work.
+control, device discovery, and electrical telemetry. If the monitor itself
+routes USB with its input, select `none` for the separate USB switch; the
+monitor's observed input then determines the active host. A legacy
+`acroname.enabled: false` is recognized as this monitor-routed mode.
 
 The UGREEN CM691 / P/N 25164 USB-C 2-in/4-out switch has no software control
 or host-state API. Its included desktop controller is a momentary button, so
