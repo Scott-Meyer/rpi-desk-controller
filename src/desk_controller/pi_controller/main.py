@@ -210,7 +210,6 @@ class DeskControllerApp:
         self._audio_state_by_host: Dict[str, str] = {}
         self.active_groups: Dict[str, int] = {}
         self._ha_toggle_states: Dict[int, str] = {}
-        self._ha_last_confirmed: Dict[int, str] = {}
         self._keypad_led_states: Dict[int, str] = {}
         self._keypad_led_generation: Dict[int, int] = {}
         self._keypad_pending: set[int] = set()
@@ -2297,10 +2296,6 @@ class DeskControllerApp:
                     else press_toggle(button, self.ha)
                 )
                 self._ha_toggle_states[key] = observed_state
-                if observed_state in {"active", "inactive"}:
-                    getattr(self, "_ha_last_confirmed", {}).update(
-                        {key: observed_state}
-                    )
                 with self._ha_toggle_lock:
                     if not success or (one_way and observed_state == "active"):
                         self._ha_toggle_pending.pop(group, None)
@@ -2533,7 +2528,6 @@ class DeskControllerApp:
             return ha_toggle_status(
                 button,
                 getattr(self, "_ha_toggle_states", {}).get(key, "unavailable"),
-                last_confirmed=getattr(self, "_ha_last_confirmed", {}).get(key),
                 pending=self._ha_pending_keys().get(key),
                 failed=key in getattr(self, "_ha_toggle_failures", set()),
             )
@@ -2691,8 +2685,6 @@ class DeskControllerApp:
                 if self._ha_toggle_states.get(key) != state:
                     self._ha_toggle_states[key] = state
                     changed = True
-                if state in {"active", "inactive"}:
-                    getattr(self, "_ha_last_confirmed", {}).update({key: state})
         with self._ha_toggle_lock:
             for group, item in list(self._ha_toggle_pending.items()):
                 if item["target"] == "requesting":

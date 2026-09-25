@@ -18,18 +18,16 @@ class DeckVisualTests(unittest.TestCase):
         pending = host_status("pc2", pending=True, pending_pc=0)
         self.assertEqual((pending.observed, pending.target), ("PC 2", "… PC 1"))
 
-    def test_ac_and_blinds_preserve_last_reliable_state_until_confirmed(self):
+    def test_ac_and_blinds_display_latest_observation_while_target_is_pending(self):
         ac = {
             "state_entity": "climate.air_conditioner_air_conditioner",
             "label": "COLD",
             "active_label": "SLEEP",
         }
-        pending = ha_toggle_status(
-            ac, "other", last_confirmed="inactive", pending="active"
-        )
+        pending = ha_toggle_status(ac, "other", pending="active")
         self.assertEqual(
             (pending.observed, pending.target, pending.phase),
-            ("COLD", "… SLEEP", "pending"),
+            ("CUSTOM", "… SLEEP", "pending"),
         )
         self.assertEqual(ha_toggle_status(ac, "active").next_action, "→ COLD")
         self.assertEqual(
@@ -47,6 +45,11 @@ class DeckVisualTests(unittest.TestCase):
             ha_toggle_status(shades, "mixed").as_dict()["next_action"], "→ CLOSED"
         )
         self.assertEqual(ha_toggle_status(shades, "moving").phase, "blocked")
+        moving = ha_toggle_status(shades, "moving", pending="active")
+        self.assertEqual(
+            (moving.observed, moving.phase, moving.target),
+            ("MOVING", "pending", "… CLOSED"),
+        )
 
     def test_keypad_ack_keeps_observed_led_independent(self):
         sent = keypad_status("BT1", "on", acknowledged=True)

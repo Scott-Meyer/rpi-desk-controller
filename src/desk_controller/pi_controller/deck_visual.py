@@ -52,7 +52,6 @@ def ha_toggle_status(
     button: Mapping[str, Any],
     state: str,
     *,
-    last_confirmed: Optional[str] = None,
     pending: Optional[str] = None,
     failed: bool = False,
 ) -> StatusKey:
@@ -67,20 +66,22 @@ def ha_toggle_status(
     )
     inactive = str(button.get("label") or "OFF").replace("\n", " ").strip().upper()
     active = str(button.get("active_label") or "ON").replace("\n", " ").strip().upper()
-    if (
-        pending
-        and state in {"mixed", "moving", "other"}
-        and last_confirmed in {"active", "inactive"}
-    ):
-        observed = active if last_confirmed == "active" else inactive
-        next_state = inactive if last_confirmed == "active" else active
-    elif state == "active":
+    if state == "active":
         observed, next_state = active, inactive
     elif state == "inactive":
         observed, next_state = inactive, active
     elif state in {"mixed", "other"}:
         observed, next_state = ("MIXED" if state == "mixed" else "CUSTOM"), active
     elif state == "moving":
+        if pending:
+            target = (
+                active
+                if pending == "active"
+                else inactive
+                if pending == "inactive"
+                else "READING"
+            )
+            return StatusKey(control, "MOVING", f"→ {target}", "pending", f"… {target}")
         return StatusKey(
             control,
             "MOVING",
