@@ -27,6 +27,7 @@ const buttonFields = {
   inactive_state: byId("buttonInactiveState"),
   active_label: byId("buttonActiveLabel"),
   state_requirements: byId("buttonStateRequirements"),
+  inactive_requirements: byId("buttonInactiveRequirements"),
 };
 
 let buttons = new Map();
@@ -34,6 +35,7 @@ let selectedKey = 0;
 let liveToggleStates = {};
 let liveTogglePending = {};
 let liveToggleFailures = new Set();
+let liveDeckVisuals = {};
 let liveKvmHost = null;
 let liveKvmFault = false;
 let hubLoading = false;
@@ -68,6 +70,7 @@ const blankButton = (key) => ({
     inactive_state: "",
     active_label: "",
     state_requirements: {},
+    inactive_requirements: {},
 });
 
 const portRow = (index) => {
@@ -209,6 +212,7 @@ function renderConnectionStatus(status) {
   liveToggleStates = status.ha_toggles || {};
   liveTogglePending = status.ha_pending || {};
   liveToggleFailures = new Set(status.ha_failures || []);
+  liveDeckVisuals = status.deck_visuals || {};
   liveKvmHost = status.active_host || null;
   liveKvmFault = Boolean(status.kvm_fault);
   renderDeck();
@@ -421,6 +425,44 @@ function renderDeck() {
     element.classList.toggle("selected", key === selectedKey);
     element.classList.toggle("empty", !button.enabled);
     element.style.setProperty("--key-accent", rgbToHex(button.accent_color));
+    const visual = button.enabled ? liveDeckVisuals[key] : null;
+    if (visual) {
+      const observedState = visual.observed || "?";
+      const intent = visual.phase === "pending"
+        ? (visual.target || visual.next_action || "…")
+        : visual.phase === "ack" ? "✓ SENT"
+        : visual.phase === "unknown" ? "? CHECK"
+        : visual.phase === "blocked" ? "? WAIT"
+        : visual.phase === "error" ? `↻ ${visual.next_action || "CHECK"}`
+        : visual.next_action || "";
+      const icon = visual.control === "HOST" ? (observedState === "?" ? "?" : "▣")
+        : visual.control === "AC" ? (observedState === "SLEEP" ? "☾" : observedState === "COLD" ? "❄" : "◌")
+        : visual.control === "SHADES" ? (observedState === "OPEN" ? "☀" : observedState === "CLOSED" ? "▤" : "◌")
+        : observedState === "LED ON" ? "●" : observedState === "LED OFF" ? "○" : "◌";
+      const position = document.createElement("span");
+      position.className = "deck-position";
+      position.textContent = key + 1;
+      const heading = document.createElement("span");
+      heading.className = "deck-identity";
+      heading.textContent = visual.control;
+      const artwork = document.createElement("span");
+      artwork.className = "deck-icon";
+      artwork.textContent = icon;
+      const title = document.createElement("strong");
+      title.textContent = observedState;
+      const detail = document.createElement("small");
+      detail.textContent = intent;
+      element.replaceChildren(position, heading, artwork, title, detail);
+      for (const phase of ["pending", "error", "unknown", "ack", "blocked"]) {
+        element.classList.toggle(phase, visual.phase === phase);
+      }
+      element.classList.toggle("active", observedState === "LED ON" || visual.phase === "ack");
+      element.setAttribute("aria-label", `${visual.control}: ${observedState}. ${intent}`);
+      return;
+    }
+    for (const phase of ["pending", "error", "unknown", "ack", "blocked"]) {
+      element.classList.remove(phase);
+    }
     const dynamicLabel = {
       current_time: "Current time",
       current_date: "Current date",
@@ -465,6 +507,7 @@ function configureActionFields() {
     ha_service: "Home Assistant entity (optional)",
     ha_toggle: "Home Assistant entity (optional)",
     ha_state_action: "Home Assistant entity (optional)",
+    ha_button: "Home Assistant keypad button entity",
     kvm_select: "KVM target (pc1 or pc2)",
     mqtt: "Optional action target",
     current_time: "Action target",
@@ -474,12 +517,15 @@ function configureActionFields() {
     workstation_slot: "Action target",
   };
   byId("targetField").firstChild.textContent = labels[action] || "Action target";
-  byId("targetField").hidden = !["audio_output", "ha_scene", "ha_service", "ha_toggle", "ha_state_action", "kvm_select"].includes(action);
+  byId("targetField").hidden = !["audio_output", "ha_scene", "ha_service", "ha_toggle", "ha_state_action", "ha_button", "kvm_select"].includes(action);
   byId("offTargetField").hidden = action !== "ha_scene";
   const observedAction = ["ha_toggle", "ha_state_action"].includes(action);
   byId("haServiceField").hidden = !["ha_service", "ha_toggle", "ha_state_action"].includes(action);
   byId("haServiceDataField").hidden = !["ha_service", "ha_toggle", "ha_state_action"].includes(action);
-  for (const id of ["haStateEntityField", "haStateAttributeField", "haActiveStateField", "haInactiveStateField", "haStateRequirementsField", "haActiveLabelField", "haActiveIconField"]) {
+  byId("haStateEntityField").hidden = !observedAction && action !== "ha_button";
+  byId("haStateEntityField").firstChild.textContent = action === "ha_button"
+    ? "Keypad LED switch entity" : "Observe entities (comma separated)";
+  for (const id of ["haStateAttributeField", "haActiveStateField", "haInactiveStateField", "haStateRequirementsField", "haInactiveRequirementsField", "haActiveLabelField", "haActiveIconField"]) {
     byId(id).hidden = !observedAction;
   }
   for (const id of ["haOffServiceField", "haOffServiceDataField"]) {
@@ -531,6 +577,8 @@ function selectKey(key) {
   buttonFields.active_label.value = button.active_label || "";
   buttonFields.state_requirements.value = Object.keys(button.state_requirements || {}).length
     ? JSON.stringify(button.state_requirements, null, 2) : "";
+  buttonFields.inactive_requirements.value = Object.keys(button.inactive_requirements || {}).length
+    ? JSON.stringify(button.inactive_requirements, null, 2) : "";
   configureActionFields();
   renderDeck();
 }
@@ -560,6 +608,12 @@ function updateSelectedButton() {
     try { stateRequirements = JSON.parse(requirementsText); }
     catch (_error) { stateRequirements = requirementsText; }
   }
+  let inactiveRequirements = {};
+  const inactiveRequirementsText = buttonFields.inactive_requirements.value.trim();
+  if (inactiveRequirementsText) {
+    try { inactiveRequirements = JSON.parse(inactiveRequirementsText); }
+    catch (_error) { inactiveRequirements = inactiveRequirementsText; }
+  }
   const button = {
     key: selectedKey,
     enabled: buttonFields.enabled.checked,
@@ -586,6 +640,7 @@ function updateSelectedButton() {
     inactive_state: buttonFields.inactive_state.value,
     active_label: buttonFields.active_label.value,
     state_requirements: stateRequirements,
+    inactive_requirements: inactiveRequirements,
   };
   buttons.set(selectedKey, button);
   configureActionFields();
@@ -652,6 +707,7 @@ function populate(config) {
   byId("displayId").value = config.monitor.display_id;
   byId("pc1Input").value = config.monitor.pc1_input;
   byId("pc2Input").value = config.monitor.pc2_input;
+  byId("piInput").value = config.monitor.pi_input || "";
   byId("brightness").value = config.streamdeck.brightness;
   byId("brightnessValue").textContent = `${config.streamdeck.brightness}%`;
   byId("pendingRequestTimeout").value = (
@@ -680,7 +736,10 @@ function populate(config) {
       buttons.set(button.key, blankButton(button.key));
       return;
     }
-    buttons.set(button.key, { ...blankButton(button.key), ...button });
+    buttons.set(button.key, {
+      ...blankButton(button.key), ...button,
+      enabled: button.enabled === undefined ? true : Boolean(button.enabled),
+    });
   });
   config.usb_hub.ports.forEach((port) => {
     const row = document.querySelector(`.port-row[data-port="${port.index}"]`);
@@ -751,6 +810,7 @@ function payload() {
       display_id: Number(byId("displayId").value),
       pc1_input: byId("pc1Input").value,
       pc2_input: byId("pc2Input").value,
+      pi_input: byId("piInput").value,
     },
     streamdeck: {
       brightness: Number(byId("brightness").value),

@@ -494,6 +494,355 @@ class StreamDeckManager:
             )
             cursor_y += bound[3] - bound[1] + line_gap
 
+    @classmethod
+    def _draw_status_icon(
+        cls,
+        draw: ImageDraw.ImageDraw,
+        control: str,
+        observed: str,
+        cx: int,
+        cy: int,
+        radius: int,
+        color: tuple,
+        bg_color: tuple,
+    ) -> None:
+        """The symbol describes the *observed* device, never an in-flight target."""
+        if observed == "?":
+            font = cls._font(radius * 2, bold=True)
+            bounds = draw.textbbox((0, 0), "?", font=font)
+            cls._centered_text(
+                draw,
+                "?",
+                cx,
+                cy - (bounds[3] - bounds[1]) // 2 - bounds[1],
+                font=font,
+                fill=color,
+            )
+        elif control == "HOST":
+            # Screen and stand, with the actual selected host inside the screen.
+            draw.rectangle(
+                [cx - radius - 5, cy - radius, cx + radius + 5, cy + radius - 3],
+                outline=color,
+                width=2,
+            )
+            draw.line([cx, cy + radius - 2, cx, cy + radius - 1], fill=color, width=2)
+            draw.line([cx - 5, cy + radius, cx + 5, cy + radius], fill=color, width=2)
+            screen = (
+                "Pi"
+                if observed in {"PI", "RASPBERRY PI"}
+                else (observed[-1] if observed in {"PC 1", "PC 2"} else "?")
+            )
+            font = cls._font(max(9, radius + 2), bold=True)
+            bounds = draw.textbbox((0, 0), screen, font=font)
+            cls._centered_text(
+                draw,
+                screen,
+                cx,
+                cy - 2 - (bounds[3] - bounds[1]) // 2 - bounds[1],
+                font=font,
+                fill=color,
+            )
+        elif control == "AC":
+            if observed in {"COLD", "COOL"}:
+                # A six-point flake with branching tips, scaled to this tiny screen.
+                for angle in range(0, 360, 60):
+                    radians = math.radians(angle)
+                    dx, dy = math.cos(radians), math.sin(radians)
+                    draw.line(
+                        [cx, cy, round(cx + radius * dx), round(cy + radius * dy)],
+                        fill=color,
+                        width=2,
+                    )
+                    for side in (-1, 1):
+                        branch = radians + side * math.pi * 3 / 4
+                        x, y = cx + radius * 0.65 * dx, cy + radius * 0.65 * dy
+                        draw.line(
+                            [
+                                round(x),
+                                round(y),
+                                round(x + 3 * math.cos(branch)),
+                                round(y + 3 * math.sin(branch)),
+                            ],
+                            fill=color,
+                            width=1,
+                        )
+            elif observed in {"SLEEP", "NIGHT"}:
+                draw.ellipse(
+                    [cx - radius, cy - radius, cx + radius, cy + radius], fill=color
+                )
+                draw.ellipse(
+                    [
+                        cx - radius + 5,
+                        cy - radius - 4,
+                        cx + radius + 5,
+                        cy + radius - 4,
+                    ],
+                    fill=bg_color,
+                )
+            else:
+                draw.arc(
+                    [cx - radius, cy - radius, cx + radius, cy + radius],
+                    35,
+                    325,
+                    fill=color,
+                    width=2,
+                )
+        elif control == "SHADES":
+            draw.rectangle(
+                [cx - radius - 3, cy - radius, cx + radius + 3, cy + radius],
+                outline=color,
+                width=2,
+            )
+            # Raised slats leave visible daylight; lowered slats fill the frame.
+            if observed in {"OPEN", "UP", "RAISED"}:
+                slats = (cy - radius + 4, cy - radius + 7)
+            elif observed == "MIXED":
+                slats = (cy - radius + 4, cy - radius + 7)
+                for y in range(cy - radius + 10, cy + radius - 1, 3):
+                    draw.line([cx + 1, y, cx + radius + 1, y], fill=color, width=1)
+            elif observed in {"CLOSED", "CLOSE", "DOWN", "LOWERED"}:
+                slats = range(cy - radius + 4, cy + radius - 1, 3)
+            else:
+                # Custom/transition states have neither a raised nor a lowered icon.
+                slats = (cy - radius + 4, cy - radius + 7, cy - radius + 10)
+            for y in slats:
+                draw.line([cx - radius - 1, y, cx + radius + 1, y], fill=color, width=1)
+        elif control.startswith("BT") and control[2:].isdigit():
+            # Lutron keypad LED, not a claim about which room lights are on.
+            # The engraved button identity is in the heading above this glyph.
+            lit = observed == "LED ON"
+            frame = [cx - radius, cy - radius, cx + radius, cy + radius]
+            draw.rounded_rectangle(frame, radius=4, outline=color, width=2)
+            led = [cx - 3, cy - radius + 3, cx + 3, cy - radius + 7]
+            if lit:
+                draw.rounded_rectangle(led, radius=2, fill=(255, 219, 126))
+            else:
+                draw.rounded_rectangle(led, radius=2, outline=color, width=1)
+            for y in (cy + 1, cy + 4):
+                draw.line([cx - 4, y, cx + 4, y], fill=color, width=1)
+        elif control == "LIGHTS":
+            lit = observed in {"ON", "BRIGHT", "FULL"}
+            dim = observed in {"DIM", "DIMMED", "LOW"}
+            mixed = observed == "MIXED"
+            if lit:
+                draw.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=color)
+            else:
+                draw.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], outline=color, width=2)
+            for angle in range(0, 360, 45 if lit else 90):
+                if mixed and angle > 180:
+                    continue  # Half-bright, half-dark; not the crossed-out OFF icon.
+                radians = math.radians(angle)
+                start = 6
+                end = radius if lit else max(7, radius - 2)
+                draw.line(
+                    [
+                        round(cx + start * math.cos(radians)),
+                        round(cy + start * math.sin(radians)),
+                        round(cx + end * math.cos(radians)),
+                        round(cy + end * math.sin(radians)),
+                    ],
+                    fill=color,
+                    width=1 if dim else 2,
+                )
+            if observed == "OFF":
+                draw.line(
+                    [cx - radius - 2, cy + radius, cx + radius + 2, cy - radius],
+                    fill=color,
+                    width=2,
+                )
+
+    @classmethod
+    def _status_label(
+        cls,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        max_width: int,
+        preferred_size: int,
+        minimum_size: int,
+    ) -> tuple[str, ImageFont.ImageFont]:
+        """Fit short labels; never let an unexpected state paint into the bezel."""
+        font = cls._fit_font(
+            draw, text, max_width, preferred_size, minimum_size, bold=True
+        )
+        if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+            return text, font
+        while text and draw.textbbox((0, 0), text + "…", font=font)[2] > max_width:
+            text = text[:-1]
+        return (text + "…" if text else "?"), font
+
+    def render_status_key(
+        self,
+        key: int,
+        control: str,
+        observed: str | None,
+        next_action: str | None,
+        *,
+        phase: str = "ready",
+        target: str | None = None,
+    ) -> None:
+        """Render one stateful 80px key without mistaking intent for observation.
+
+        ``control`` is HOST, AC, SHADES, LIGHTS or BT1–BT4. ``observed`` is a short
+        human-readable actual state (e.g. PC 2, SLEEP, OPEN, MIXED, DIM), or
+        None/? when it cannot be read. ``next_action`` is the *press* label,
+        optionally prefixed by a direction arrow (e.g. → PC 1, ↓ CLOSE).
+        ``phase`` is ready, pending, ack, blocked, error or unknown. Pending retains the
+        observed state/icon and shows ``target`` (or next_action) as intent;
+        error offers a retry label only when a safe action is known, never a
+        false successful state. Unknown state always shows ? / CHECK.
+        """
+        control = control.upper().strip()
+        if control not in {"HOST", "AC", "SHADES", "LIGHTS"} and not (
+            control.startswith("BT") and control[2:] in {"1", "2", "3", "4"}
+        ):
+            raise ValueError(f"Unknown status control: {control}")
+        if phase not in {"ready", "pending", "ack", "blocked", "error", "unknown"}:
+            raise ValueError(f"Unknown status phase: {phase}")
+        observed = (observed or "?").upper().strip() or "?"
+        if observed == "?":
+            phase = "unknown" if phase == "ready" else phase
+        if phase == "unknown":
+            observed = "?"
+        if phase == "ack":
+            action = "✓ SENT"
+        elif phase == "error":
+            requested = (next_action or "").strip().removeprefix("→").strip()
+            action = (
+                f"↻ {requested}"
+                if requested and requested.upper() != "CHECK"
+                else "? CHECK"
+            )
+        elif phase == "unknown":
+            action = "? CHECK"
+        elif phase == "blocked":
+            action = "? WAIT"
+        else:
+            action = target if phase == "pending" and target else next_action
+            action = (action or "?").strip()
+            if action != "?" and not action.startswith(("→", "↓", "↑", "↻", "?", "->")):
+                action = "→ " + action
+        if not STREAMDECK_LIB_AVAILABLE or not self.deck:
+            logger.info(
+                "[Mock] Stream Deck Key %s [%s] %s: %s -> %s",
+                key,
+                phase.upper(),
+                control,
+                observed,
+                action,
+            )
+            return
+
+        width, height = self.deck.key_image_format()["size"]
+        bg = (10, 10, 14)
+        img = Image.new("RGB", (width, height), bg)
+        draw = ImageDraw.Draw(img)
+        content = Image.new("RGB", (width, height), bg)
+        canvas = ImageDraw.Draw(content)
+        inset = math.ceil(min(width, height) * self.CONTENT_INSET_RATIO)
+        safe_width, safe_height = width - 2 * inset, height - 2 * inset
+        cx = width // 2
+
+        if phase == "pending":
+            self._draw_dotted_border(draw, width, height, (255, 196, 0))
+        elif phase == "error":
+            draw.rectangle(
+                [2, 2, width - 3, height - 3], outline=(255, 78, 78), width=3
+            )
+        elif phase == "ack":
+            draw.rectangle(
+                [2, 2, width - 3, height - 3], outline=(110, 226, 158), width=2
+            )
+        else:
+            border = (45, 49, 59) if phase == "ready" else (55, 58, 68)
+            draw.rectangle([2, 2, width - 3, height - 3], outline=border, width=1)
+
+        muted = phase == "unknown"
+        accent = {
+            "ready": (139, 204, 234),
+            "pending": (255, 200, 92),
+            "ack": (110, 226, 158),
+            "blocked": (145, 154, 168),
+            "error": (255, 114, 114),
+            "unknown": (133, 145, 159),
+        }[phase]
+        state_color = (164, 177, 193) if muted else (240, 245, 250)
+        icon_color = (112, 125, 140) if muted else (171, 202, 219)
+        heading, header_font = self._status_label(canvas, control, safe_width, 9, 7)
+        header_bounds = canvas.textbbox((0, 0), heading, font=header_font)
+        canvas.text(
+            (inset, inset - header_bounds[1]),
+            heading,
+            fill=accent,
+            font=header_font,
+        )
+        phase_mark = {
+            "pending": "...",
+            "ack": "✓",
+            "blocked": "…",
+            "error": "!",
+            "unknown": "?",
+        }.get(phase)
+        if phase_mark:
+            marker_font = self._font(8, bold=True)
+            marker_bounds = canvas.textbbox((0, 0), phase_mark, font=marker_font)
+            canvas.text(
+                (
+                    width
+                    - inset
+                    - (marker_bounds[2] - marker_bounds[0])
+                    - marker_bounds[0],
+                    inset - marker_bounds[1],
+                ),
+                phase_mark,
+                font=marker_font,
+                fill=accent,
+            )
+
+        self._draw_status_icon(
+            canvas,
+            control,
+            observed,
+            cx,
+            inset + round(safe_height * 0.37),
+            max(6, round(safe_height * 0.15)),
+            icon_color,
+            bg,
+        )
+        state_label, state_font = self._status_label(
+            canvas, observed, safe_width, 12, 8
+        )
+        state_bounds = canvas.textbbox((0, 0), state_label, font=state_font)
+        self._centered_text(
+            canvas,
+            state_label,
+            cx,
+            inset + round(safe_height * 0.57) - state_bounds[1],
+            font=state_font,
+            fill=state_color,
+        )
+        divider_y = inset + round(safe_height * 0.76)
+        canvas.line(
+            [inset + 3, divider_y, width - inset - 4, divider_y], fill=(67, 73, 86)
+        )
+        action_label, action_font = self._status_label(
+            canvas, action, safe_width, 11, 7
+        )
+        action_bounds = canvas.textbbox((0, 0), action_label, font=action_font)
+        self._centered_text(
+            canvas,
+            action_label,
+            cx,
+            divider_y + 3 - action_bounds[1],
+            font=action_font,
+            fill=accent,
+        )
+
+        safe_box = (inset, inset, width - inset, height - inset)
+        img.paste(content.crop(safe_box), safe_box[:2])
+        native_image = PILHelper.to_native_format(self.deck, img)
+        with self.deck:
+            self.deck.set_key_image(key, native_image)
+
     def render_scene_key(
         self,
         key: int,

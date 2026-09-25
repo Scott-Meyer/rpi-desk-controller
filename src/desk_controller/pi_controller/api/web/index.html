@@ -120,8 +120,8 @@
             <label class="ugreen-setting sentinel-setting" hidden>Sentinel serial number<input id="usbSentinelSerial" placeholder="Optional"></label>
             <label class="ugreen-setting sentinel-setting" hidden>Observation interval (seconds)<input id="usbObservationPollInterval" type="number" min="1" max="30"></label>
             <label class="ugreen-setting sentinel-setting" hidden>Verification timeout (seconds)<input id="usbObservationTimeout" type="number" min="3" max="60"></label>
-            <label>PC 1 workstation ID<input id="workstationPc1" required></label>
-            <label>PC 2 workstation ID<input id="workstationPc2" required></label>
+            <label>PC 1 workstation ID (optional)<input id="workstationPc1"></label>
+            <label>PC 2 workstation ID (optional)<input id="workstationPc2"></label>
           </div>
           <p id="monitorUsbNote" class="note" hidden>Use this when changing the monitor input also moves keyboard and mouse USB. The monitor is the only switching hardware and must confirm the active input.</p>
           <p id="ugreenWiringNote" class="note" hidden>Use an isolated relay or optocoupler in parallel with the included desktop-controller button. Never connect the switch control cable directly to a Raspberry Pi GPIO. Without sentinel observation, the startup host must match the illuminated host and manual button presses cannot be detected.</p>
@@ -176,6 +176,7 @@
             <label>Display ID<input id="displayId" type="number" min="1" required></label>
             <label>PC 1 input<input id="pc1Input" required placeholder="0x0f"></label>
             <label>PC 2 input<input id="pc2Input" required placeholder="0x11"></label>
+            <label>Pi display input (optional)<input id="piInput" placeholder="0x01"></label>
           </div>
 
           <div class="divider"></div>
@@ -281,6 +282,7 @@
                     <option value="ha_service">Call Home Assistant service</option>
                     <option value="ha_toggle">Toggle from Home Assistant state</option>
                     <option value="ha_state_action">Request a Home Assistant state</option>
+                    <option value="ha_button">Press HA keypad button (show LED)</option>
                     <option value="mqtt">Publish custom MQTT</option>
                     <option value="workstation_slot" hidden>Legacy computer slot</option>
                   </select>
@@ -328,6 +330,7 @@
                 <label id="haActiveStateField">Active value<input id="buttonActiveState" placeholder="0"></label>
                 <label id="haStateRequirementsField">Additional active-state attributes (JSON)<textarea id="buttonStateRequirements" rows="3" placeholder='{"state":"cool","temperature":70.5,"swing_mode":"off"}'></textarea></label>
                 <label id="haInactiveStateField">Inactive value (optional)<input id="buttonInactiveState" placeholder="100"></label>
+                <label id="haInactiveRequirementsField">Additional inactive-state attributes (JSON)<textarea id="buttonInactiveRequirements" rows="3" placeholder='{"state":"cool","temperature":68,"swing_mode":"both"}'></textarea></label>
                 <label id="haActiveLabelField">Label while active<input id="buttonActiveLabel" placeholder="OFFICE CLOSED"></label>
                 <label id="mqttTopicField">Custom MQTT topic<input id="buttonMqttTopic"></label>
                 <label id="mqttPayloadField">Custom MQTT payload<input id="buttonMqttPayload"></label>

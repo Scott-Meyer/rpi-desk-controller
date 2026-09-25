@@ -228,25 +228,37 @@ class MonitorSettings(BaseModel):
     display_id: int = Field(ge=1, le=64)
     pc1_input: str
     pc2_input: str
+    pi_input: str = ""
 
-    @field_validator("pc1_input", "pc2_input")
+    @field_validator("pc1_input", "pc2_input", "pi_input")
     @classmethod
-    def validate_input(cls, value: str) -> str:
+    def validate_input(cls, value: str, info) -> str:
         value = value.strip()
+        if not value and info.field_name == "pi_input":
+            return ""
         if not _INPUT_PATTERN.fullmatch(value):
             raise ValueError("monitor inputs must be one-byte hexadecimal values")
         return f"0x{int(value, 16):02x}"
 
+    @model_validator(mode="after")
+    def require_distinct_inputs(self):
+        codes = [self.pc1_input, self.pc2_input]
+        if self.pi_input:
+            codes.append(self.pi_input)
+        if len(codes) != len(set(codes)):
+            raise ValueError("PC 1, PC 2 and Pi monitor inputs must be distinct")
+        return self
+
 
 class WorkstationSettings(BaseModel):
-    pc1: str = Field(min_length=1, max_length=128)
-    pc2: str = Field(min_length=1, max_length=128)
+    pc1: str = Field(max_length=128)
+    pc2: str = Field(max_length=128)
 
     @field_validator("pc1", "pc2")
     @classmethod
     def validate_device_id(cls, value: str) -> str:
         value = value.strip()
-        if not _DEVICE_ID_PATTERN.fullmatch(value):
+        if value and not _DEVICE_ID_PATTERN.fullmatch(value):
             raise ValueError(
                 "workstation IDs may only contain letters, numbers, dots, dashes, and underscores"
             )
@@ -276,6 +288,7 @@ class StreamDeckButtonSettings(BaseModel):
         "ha_service",
         "ha_toggle",
         "ha_state_action",
+        "ha_button",
         "mqtt",
         "workstation_slot",
     ] = "none"
@@ -296,6 +309,7 @@ class StreamDeckButtonSettings(BaseModel):
     inactive_state: str = Field(default="", max_length=128)
     active_label: str = Field(default="", max_length=128)
     state_requirements: Dict[str, Any] = Field(default_factory=dict)
+    inactive_requirements: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("accent_color")
     @classmethod
@@ -339,6 +353,11 @@ class StreamDeckButtonSettings(BaseModel):
             return self
         if self.action_type == "kvm_select" and self.target not in {"pc1", "pc2"}:
             raise ValueError("KVM select target must be pc1 or pc2")
+        if self.action_type == "ha_button":
+            if not re.fullmatch(r"button\.[a-z0-9_]+", self.target):
+                raise ValueError("HA keypad target must be a button entity")
+            if not re.fullmatch(r"switch\.[a-z0-9_]+", self.state_entity):
+                raise ValueError("HA keypad feedback must be a switch LED entity")
         if self.action_type == "audio_output" and not self.target:
             raise ValueError("audio buttons require an output-device target")
         if self.action_type == "ha_scene" and not self.target.startswith("scene."):
@@ -569,7 +588,10 @@ def _public_config() -> Dict:
     acroname = config.get("acroname", {})
     usb_switch = config.get("usb_switch", {})
     controller = config.get("controller", {})
-    buttons = configured_streamdeck_buttons(config)
+    buttons = {
+        key: {**button, "enabled": button.get("enabled", True)}
+        for key, button in configured_streamdeck_buttons(config).items()
+    }
     ports = configured_usb_ports(config)
     usb_hub = config.get("usb_hub", {})
     layout = _STREAMDECK_LAYOUT_PROVIDER() if _STREAMDECK_LAYOUT_PROVIDER else None
@@ -650,6 +672,7 @@ def _public_config() -> Dict:
             "display_id": monitor.get("display_id", 1),
             "pc1_input": inputs.get("pc1", "0x0f"),
             "pc2_input": inputs.get("pc2", "0x11"),
+            "pi_input": inputs.get("pi", ""),
         },
         "streamdeck": {
             "device_detected": layout is not None,
@@ -747,6 +770,11 @@ def _save_update(payload: PiConfigurationUpdate) -> Path:
                 "inputs": {
                     "pc1": payload.monitor.pc1_input,
                     "pc2": payload.monitor.pc2_input,
+                    **(
+                        {"pi": payload.monitor.pi_input}
+                        if payload.monitor.pi_input
+                        else {}
+                    ),
                 },
             }
         ]

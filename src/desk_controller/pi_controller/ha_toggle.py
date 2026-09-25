@@ -38,6 +38,7 @@ def read_toggle_state(button: Mapping[str, Any], ha: HomeAssistantClient) -> str
 
     states = []
     active_matches = []
+    inactive_matches = []
     for entity in entities:
         result = ha.get_state(entity)
         if not isinstance(result, dict) or result.get("state") in (
@@ -57,12 +58,15 @@ def read_toggle_state(button: Mapping[str, Any], ha: HomeAssistantClient) -> str
         if value is None:
             return "unavailable"
         states.append(value)
-        requirements = button.get("state_requirements", {})
-        if not isinstance(requirements, dict):
+        active_requirements = button.get("state_requirements", {})
+        inactive_requirements = button.get("inactive_requirements", {})
+        if not isinstance(active_requirements, dict) or not isinstance(
+            inactive_requirements, dict
+        ):
             return "unavailable"
-        active_matches.append(
-            _same_state_value(value, button["active_state"])
-            and all(
+
+        def matches(requirements):
+            return all(
                 _same_state_value(
                     result["state"]
                     if key == "state"
@@ -71,12 +75,21 @@ def read_toggle_state(button: Mapping[str, Any], ha: HomeAssistantClient) -> str
                 )
                 for key, expected in requirements.items()
             )
+
+        active_matches.append(
+            _same_state_value(value, button["active_state"])
+            and matches(active_requirements)
+        )
+        inactive = button.get("inactive_state", "")
+        inactive_matches.append(
+            inactive != ""
+            and _same_state_value(value, inactive)
+            and matches(inactive_requirements)
         )
 
     if all(active_matches):
         return "active"
-    inactive = button.get("inactive_state", "")
-    if inactive != "" and all(_same_state_value(value, inactive) for value in states):
+    if all(inactive_matches):
         return "inactive"
     if len({str(value) for value in states}) > 1:
         return "mixed"

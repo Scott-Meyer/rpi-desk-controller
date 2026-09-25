@@ -8,6 +8,7 @@ from fastapi import HTTPException, Request
 
 from desk_controller.config import load_config
 from desk_controller.pi_controller.api.config_ui import (
+    MonitorSettings,
     PiConfigurationUpdate,
     StreamDeckButtonSettings,
     SystemUpdatePayload,
@@ -93,6 +94,38 @@ audio_devices: {}
         self.assertEqual(config["streamdeck"]["columns"], 3)
         self.assertTrue(config["streamdeck"]["device_detected"])
         self.assertIn(14, [button["key"] for button in config["streamdeck"]["buttons"]])
+
+    def test_sparse_yaml_buttons_remain_enabled_in_public_editor_config(self):
+        stored = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        stored["streamdeck"]["buttons"] = {
+            0: {"label": "HOST", "action_type": "kvm_toggle"},
+            1: {"label": "Disabled", "enabled": False, "action_type": "none"},
+        }
+        self.config_path.write_text(yaml.safe_dump(stored), encoding="utf-8")
+        buttons = {
+            button["key"]: button
+            for button in get_configuration()["streamdeck"]["buttons"]
+        }
+        self.assertIs(buttons[0]["enabled"], True)
+        self.assertIs(buttons[1]["enabled"], False)
+
+    def test_monitor_inputs_must_identify_three_different_sources(self):
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            MonitorSettings(
+                display_id=1, pc1_input="0x05", pc2_input="0x05", pi_input="0x01"
+            )
+        with self.assertRaises(ValidationError):
+            MonitorSettings(
+                display_id=1, pc1_input="0x05", pc2_input="0x06", pi_input="0x05"
+            )
+        self.assertEqual(
+            MonitorSettings(
+                display_id=1, pc1_input="0x5", pc2_input="0x06", pi_input=""
+            ).pc1_input,
+            "0x05",
+        )
 
     def test_page_and_public_config_never_return_stored_secrets(self):
         page = configuration_page()

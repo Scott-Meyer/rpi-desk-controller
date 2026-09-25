@@ -179,6 +179,50 @@ class HAToggleTests(TestCase):
         ha.get_state.return_value["state"] = "open"
         self.assertEqual(read_toggle_state(button, ha), "active")
 
+    def test_both_ac_profiles_require_complete_observed_conditions(self):
+        button = {
+            "action_type": "ha_toggle",
+            "state_entity": "climate.air_conditioner_air_conditioner",
+            "state_attribute": "fan_mode",
+            "active_state": "silent",
+            "inactive_state": "turbo",
+            "state_requirements": {
+                "state": "cool",
+                "temperature": 70.5,
+                "swing_mode": "off",
+                "preset_mode": "none",
+            },
+            "inactive_requirements": {
+                "state": "cool",
+                "temperature": 68,
+                "swing_mode": "both",
+                "preset_mode": "none",
+            },
+            "service": "mqtt.publish",
+            "service_data": {"topic": "sean_ac/cmd/preset", "payload": "sleep"},
+            "off_service": "mqtt.publish",
+            "off_service_data": {"topic": "sean_ac/cmd/preset", "payload": "cold"},
+        }
+        ha = Mock()
+        ha.get_state.return_value = {
+            "state": "off",
+            "attributes": {
+                "fan_mode": "turbo",
+                "temperature": 68.0,
+                "swing_mode": "both",
+                "preset_mode": "none",
+            },
+        }
+        self.assertEqual(read_toggle_state(button, ha), "other")
+        ha.get_state.return_value["state"] = "cool"
+        self.assertEqual(read_toggle_state(button, ha), "inactive")
+        ha.get_state.return_value["attributes"]["fan_mode"] = "silent"
+        ha.get_state.return_value["attributes"]["temperature"] = 70.5
+        ha.get_state.return_value["attributes"]["swing_mode"] = "off"
+        self.assertEqual(read_toggle_state(button, ha), "active")
+        ha.get_state.return_value["attributes"]["preset_mode"] = "eco"
+        self.assertEqual(read_toggle_state(button, ha), "other")
+
     def test_ac_preset_branch_follows_observed_fan_not_last_press(self):
         button = {
             "state_entity": "climate.air_conditioner_air_conditioner",

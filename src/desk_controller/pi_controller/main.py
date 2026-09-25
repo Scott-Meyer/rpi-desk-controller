@@ -51,10 +51,20 @@ from desk_controller.pi_controller.api.app import (
     ingest_mqtt_telemetry,
 )
 from desk_controller.pi_controller.api.config_ui import configure_config_ui
+from desk_controller.pi_controller.deck_visual import (
+    StatusKey,
+    ha_toggle_status,
+    host_status,
+    keypad_status,
+)
 from desk_controller.pi_controller.drivers.monitor_ddc import MonitorDDCController
 from desk_controller.pi_controller.drivers.streamdeck_mgr import StreamDeckManager
 from desk_controller.pi_controller.drivers.usb_switch import (
     create_usb_controller,
+)
+from desk_controller.pi_controller.ha_keypad import (
+    press_keypad_button,
+    read_keypad_led,
 )
 from desk_controller.pi_controller.ha_toggle import (
     press_state_action,
@@ -184,6 +194,7 @@ class DeskControllerApp:
         if self.current_pc not in (0, 1):
             raise ValueError("usb_switch.default_channel must be 0 or 1")
         self._kvm_lock = threading.RLock()
+        self._kvm_admission_lock = threading.RLock()
         self._remote_kvm_lock = threading.RLock()
         self._remote_kvm_waiters: Dict[str, Dict[str, Any]] = {}
         self._kvm_request_ids: Dict[str, float] = {}
@@ -194,16 +205,35 @@ class DeskControllerApp:
         self.buttons = self.workstation_deck.resolve(self._get_active_hostname())
         self.kvm_fault = False
         self._kvm_switch_in_flight = False
+        self._kvm_pending_target: Optional[int] = None
         self.active_audio_device = ""
         self._audio_state_by_host: Dict[str, str] = {}
         self.active_groups: Dict[str, int] = {}
         self._ha_toggle_states: Dict[int, str] = {}
+        self._ha_last_confirmed: Dict[int, str] = {}
+        self._keypad_led_states: Dict[int, str] = {}
+        self._keypad_led_generation: Dict[int, int] = {}
+        self._keypad_pending: set[int] = set()
+        self._keypad_failures: set[int] = set()
+        self._keypad_ack_until: Dict[int, float] = {}
+        self._keypad_lock = threading.RLock()
+        self._deck_render_lock = threading.RLock()
+        self._last_keypad_poll = 0.0
         self._ha_toggle_in_flight: set[str] = set()
         self._ha_toggle_pending: Dict[str, Dict[str, Any]] = {}
         self._ha_toggle_failures: set[int] = set()
         self._ha_toggle_lock = threading.RLock()
         self._last_ha_toggle_poll = 0.0
         self._last_monitor_check = 0.0
+        self._monitor_observer: Optional[threading.Thread] = None
+        self._monitor_generation = 0
+        self._monitor_source = (
+            "unknown"
+            if getattr(self.acroname, "DRIVER", "") == "none"
+            and self.config.get("kvm", {}).get("usb_controller", "pi") == "pi"
+            and self.config.get("kvm", {}).get("monitor_controller", "pi") == "pi"
+            else None
+        )
         self._clock_display_minute: Optional[str] = None
 
         # Setup MQTT Client with HA credentials
@@ -294,9 +324,12 @@ class DeskControllerApp:
             "ha_toggles": dict(getattr(self, "_ha_toggle_states", {})),
             "ha_pending": self._ha_pending_keys(),
             "ha_failures": list(getattr(self, "_ha_toggle_failures", set())),
-            "active_host": (
-                f"pc{self.current_pc + 1}" if hasattr(self, "current_pc") else None
-            ),
+            "keypad_leds": dict(getattr(self, "_keypad_led_states", {})),
+            "keypad_pending": list(getattr(self, "_keypad_pending", set())),
+            "keypad_failures": list(getattr(self, "_keypad_failures", set())),
+            "keypad_ack": list(getattr(self, "_keypad_ack_until", {})),
+            "deck_visuals": self._status_visuals(),
+            "active_host": self._observed_host(),
             "kvm_fault": getattr(self, "kvm_fault", False),
         }
 
@@ -328,16 +361,16 @@ class DeskControllerApp:
         ):
             logger.warning("Failed publishing retained controller status")
         with self._kvm_lock:
-            current_pc = self.current_pc
+            observed_host = self._observed_host()
             kvm_fault = self.kvm_fault
         self.mqtt.publish(
             "desk/kvm/state",
-            f"PC{current_pc + 1}",
+            (observed_host or "unknown").upper(),
             retain=True,
         )
         self.mqtt.publish(
             "desk/kvm/availability",
-            "offline" if kvm_fault else "online",
+            "offline" if kvm_fault or observed_host not in {"pc1", "pc2"} else "online",
             retain=True,
         )
         self._publish_streamdeck_layout()
@@ -679,13 +712,12 @@ class DeskControllerApp:
         transaction_id: UUID,
     ) -> bool:
         if owner == "pi":
-            monitors_cfg = self.config.get("monitors", [{}])
-            inputs_cfg = (monitors_cfg[0] if monitors_cfg else {}).get("inputs", {})
-            input_code = inputs_cfg.get(
-                f"pc{target_pc + 1}",
-                "0x0f" if target_pc == 0 else "0x11",
-            )
-            return self.monitor.set_input_source(input_code)
+            codes = self._monitor_input_codes()
+            if codes is None:
+                logger.error("Monitor input mapping is invalid or ambiguous")
+                return False
+            input_code = codes[f"pc{target_pc + 1}"]
+            return self.monitor.set_input_source(f"0x{input_code:02x}")
         result = self._execute_remote_kvm_step(
             owner,
             transaction_id,
@@ -696,8 +728,12 @@ class DeskControllerApp:
             logger.error("Remote monitor switch failed: %s", result.detail)
         return bool(result and result.success)
 
-    def _start_kvm_switch(self, target_pc: int) -> bool:
+    def _start_kvm_switch(self, target_pc: Optional[int]) -> bool:
         """Start a non-blocking switch, giving immediate Stream Deck feedback.
+
+        A ``None`` target is a physical toggle. It reads the actual monitor
+        input in the worker before choosing a destination, so manual source
+        changes never invert a stale cached host on the input-reader thread.
 
         Runs the transaction on a background thread so callers on the MQTT
         network loop or the Stream Deck key-press thread never block on the
@@ -705,28 +741,68 @@ class DeskControllerApp:
         Repeated calls while a switch is already running are ignored rather
         than queued, so rapid button mashing doesn't pile up serial delays.
         """
-        worker = getattr(self, "_kvm_worker", None)
-        if worker is not None and worker.is_alive():
-            logger.warning("Ignoring KVM request while a switch is already running")
-            return False
+        with getattr(self, "_kvm_admission_lock", self._kvm_lock):
+            worker = getattr(self, "_kvm_worker", None)
+            if getattr(self, "_kvm_switch_in_flight", False) or (
+                worker is not None and worker.is_alive()
+            ):
+                logger.warning("Ignoring KVM request while a switch is already running")
+                return False
+            self._kvm_pending_target = target_pc
+            self._kvm_switch_in_flight = True
+            self._monitor_generation = getattr(self, "_monitor_generation", 0) + 1
 
         def _run():
             try:
-                self._switch_kvm(target_pc)
+                destination = target_pc
+                if destination is None:
+                    if (
+                        getattr(self.acroname, "DRIVER", "") == "none"
+                        and self._resolve_kvm_controller("usb") == "pi"
+                        and self._resolve_kvm_controller("monitor") == "pi"
+                    ):
+                        source = self._monitor_source_for_input(
+                            self.monitor.get_input_source()
+                        )
+                        with self._kvm_lock:
+                            self._monitor_source = source
+                            if source == "unknown":
+                                self._set_kvm_fault(
+                                    "Cannot toggle KVM: monitor input is unknown"
+                                )
+                                return
+                            if source in {"pc1", "pc2"}:
+                                self.current_pc = 0 if source == "pc1" else 1
+                            destination = 1 if source == "pc1" else 0
+                    elif self.kvm_fault:
+                        logger.warning("Cannot toggle KVM from an unverified host")
+                        return
+                    else:
+                        destination = 1 - self.current_pc
+                self._kvm_pending_target = destination
+                self._update_sd_keys()
+                self._switch_kvm(destination)
             finally:
-                self._kvm_switch_in_flight = False
+                with getattr(self, "_kvm_admission_lock", self._kvm_lock):
+                    self._kvm_pending_target = None
+                    self._kvm_switch_in_flight = False
                 self._update_sd_keys()
                 self._publish_streamdeck_state()
 
-        self._kvm_switch_in_flight = True
-        self._update_sd_keys()
-        self._publish_streamdeck_state()
-        self._kvm_worker = threading.Thread(
-            target=_run,
-            name="kvm-transaction",
-            daemon=True,
-        )
-        self._kvm_worker.start()
+        try:
+            self._update_sd_keys()
+            self._publish_streamdeck_state()
+            self._kvm_worker = threading.Thread(
+                target=_run,
+                name="kvm-transaction",
+                daemon=True,
+            )
+            self._kvm_worker.start()
+        except Exception:
+            with getattr(self, "_kvm_admission_lock", self._kvm_lock):
+                self._kvm_pending_target = None
+                self._kvm_switch_in_flight = False
+            raise
         return True
 
     def _reconcile_kvm_state(self) -> bool:
@@ -736,7 +812,7 @@ class DeskControllerApp:
             self._apply_active_audio_state()
             self.mqtt.publish(
                 "desk/kvm/state",
-                f"PC{self.current_pc + 1}",
+                (self._observed_host() or "unknown").upper(),
                 retain=True,
             )
             self.mqtt.publish(
@@ -750,15 +826,70 @@ class DeskControllerApp:
             return success
 
     def _start_kvm_reconcile(self) -> bool:
-        worker = getattr(self, "_kvm_worker", None)
-        if worker is not None and worker.is_alive():
+        with getattr(self, "_kvm_admission_lock", self._kvm_lock):
+            worker = getattr(self, "_kvm_worker", None)
+            if getattr(self, "_kvm_switch_in_flight", False) or (
+                worker is not None and worker.is_alive()
+            ):
+                return False
+            self._kvm_worker = threading.Thread(
+                target=self._reconcile_kvm_state,
+                name="kvm-reconcile",
+                daemon=True,
+            )
+            self._kvm_worker.start()
+        return True
+
+    def _observe_monitor_source(self) -> bool:
+        """Follow manual monitor changes without moving video or USB."""
+        generation = getattr(self, "_monitor_generation", 0)
+        source = self._monitor_source_for_input(self.monitor.get_input_source())
+        with self._kvm_lock:
+            if getattr(self, "_monitor_generation", 0) != generation or getattr(
+                self, "_kvm_switch_in_flight", False
+            ):
+                return False  # A switch superseded this slow read.
+            previous = self._observed_host()
+            if source == previous or (
+                source == "unknown" and previous is None and self.kvm_fault
+            ):
+                return False
+            self._monitor_source = source
+            self.kvm_fault = source == "unknown"
+            if source in {"pc1", "pc2"}:
+                self.current_pc = 0 if source == "pc1" else 1
+                self._refresh_workstation_deck()
+                self._apply_active_audio_state()
+            self.mqtt.publish("desk/kvm/state", source.upper(), retain=True)
+            self.mqtt.publish(
+                "desk/kvm/availability",
+                "online" if source in {"pc1", "pc2"} else "offline",
+                retain=True,
+            )
+            self._update_sd_keys()
+            self._publish_streamdeck_layout()
+            self._publish_streamdeck_state()
+            return True
+
+    def _start_monitor_observation(self) -> bool:
+        """Inspect local monitor state off the Stream Deck and main-loop threads."""
+        if (
+            getattr(self.acroname, "DRIVER", "") != "none"
+            or self._resolve_kvm_controller("usb") != "pi"
+            or self._resolve_kvm_controller("monitor") != "pi"
+            or getattr(self, "_kvm_switch_in_flight", False)
+        ):
             return False
-        self._kvm_worker = threading.Thread(
-            target=self._reconcile_kvm_state,
-            name="kvm-reconcile",
+        worker = getattr(self, "_kvm_worker", None)
+        observer = getattr(self, "_monitor_observer", None)
+        if (worker and worker.is_alive()) or (observer and observer.is_alive()):
+            return False
+        self._monitor_observer = threading.Thread(
+            target=self._observe_monitor_source,
+            name="monitor-observation",
             daemon=True,
         )
-        self._kvm_worker.start()
+        self._monitor_observer.start()
         return True
 
     def _selected_agent_online(self) -> bool:
@@ -998,7 +1129,7 @@ class DeskControllerApp:
                 )
                 return
             target_pc = {
-                "toggle": 1 - self.current_pc,
+                "toggle": None,
                 "pc1": 0,
                 "pc2": 1,
             }[request.target]
@@ -1087,7 +1218,7 @@ class DeskControllerApp:
             elif target_pc in ["PC2", "2"]:
                 self._start_kvm_switch(1)
             elif target_pc == "TOGGLE":
-                self._start_kvm_switch(1 - self.current_pc)
+                self._start_kvm_switch(None)
 
         elif topic.endswith("/telemetry"):
             if not ingest_mqtt_telemetry(topic, payload):
@@ -1114,6 +1245,12 @@ class DeskControllerApp:
 
     def _set_kvm_fault(self, message: str):
         self.kvm_fault = True
+        if (
+            getattr(self.acroname, "DRIVER", "") == "none"
+            and self._resolve_kvm_controller("usb") == "pi"
+            and self._resolve_kvm_controller("monitor") == "pi"
+        ):
+            self._monitor_source = "unknown"
         logger.error(message)
         self.mqtt.publish("desk/kvm/availability", "offline", retain=True)
         self._update_sd_keys()
@@ -1126,6 +1263,41 @@ class DeskControllerApp:
             return int(str(input_code), 16)
         except (TypeError, ValueError):
             return None
+
+    def _monitor_input_codes(self) -> Optional[Dict[str, int]]:
+        """Reject ambiguous raw YAML mappings as well as UI-edited mappings."""
+        monitors_cfg = self.config.get("monitors", [{}])
+        inputs = (monitors_cfg[0] if monitors_cfg else {}).get("inputs", {})
+        configured = {
+            name: self._monitor_input_value(inputs.get(name, fallback))
+            for name, fallback in (("pc1", "0x0f"), ("pc2", "0x11"), ("pi", None))
+        }
+        if configured["pc1"] is None or configured["pc2"] is None:
+            return None
+        codes = {name: value for name, value in configured.items() if value is not None}
+        if len(codes) != len(set(codes.values())):
+            return None
+        return codes
+
+    def _monitor_source_for_input(self, input_source: Optional[int]) -> str:
+        """Map a DDC reading to PC 1, PC 2, Pi, or an honest unknown."""
+        if input_source is None:
+            return "unknown"
+        codes = self._monitor_input_codes()
+        if codes is None:
+            return "unknown"
+        return next(
+            (name for name, code in codes.items() if code == input_source), "unknown"
+        )
+
+    def _observed_host(self) -> Optional[str]:
+        source = getattr(self, "_monitor_source", None)
+        if source in {"pc1", "pc2", "pi"}:
+            return source
+        if source == "unknown" or getattr(self, "kvm_fault", False):
+            return None
+        current_pc = getattr(self, "current_pc", None)
+        return f"pc{current_pc + 1}" if current_pc in (0, 1) else None
 
     def _observed_usb_pc(self, usb_owner: str) -> Optional[int]:
         """Best-effort direct hardware read of which PC currently owns USB.
@@ -1193,14 +1365,28 @@ class DeskControllerApp:
         monitor_routes_usb = (
             usb_owner == "pi" and getattr(self.acroname, "DRIVER", "") == "none"
         )
-        if input_source is None:
-            if monitor_routes_usb:
+        if monitor_routes_usb:
+            source = self._monitor_source_for_input(input_source)
+            self._monitor_source = source
+            if source == "unknown":
                 self.kvm_fault = True
                 logger.error(
-                    "Monitor routes USB but its current input could not be read; "
-                    "refusing to assume the active host"
+                    "Monitor routes USB but input %s maps to no configured source",
+                    f"0x{input_source:02x}"
+                    if input_source is not None
+                    else "unreadable",
                 )
                 return False
+            if source == "pi":
+                self.kvm_fault = False
+                logger.info("Pi monitor input is selected; no workstation owns USB")
+                return False
+            self.current_pc = 0 if source == "pc1" else 1
+            self.kvm_fault = False
+            self._refresh_workstation_deck()
+            logger.info("Monitor input identifies %s", source.upper())
+            return True
+        if input_source is None:
             logger.info(
                 "Monitor input unavailable; using %s host PC%s",
                 "the observed USB state"
@@ -1226,13 +1412,6 @@ class DeskControllerApp:
                 None,
             )
             if matching_pc is None:
-                if monitor_routes_usb:
-                    self.kvm_fault = True
-                    logger.error(
-                        "Monitor routes USB but input 0x%02x maps to neither host",
-                        input_source,
-                    )
-                    return False
                 logger.warning(
                     "Monitor input 0x%02x does not map to a configured host; "
                     "using %s host PC%s",
@@ -1336,6 +1515,8 @@ class DeskControllerApp:
 
         self.current_pc = target_pc_index
         self.kvm_fault = False
+        if usb_owner == "pi" and getattr(self.acroname, "DRIVER", "") == "none":
+            self._monitor_source = f"pc{target_pc_index + 1}"
 
         # Retained state from every workstation is cached as it arrives, so a
         # committed host switch can immediately restore the correct highlight.
@@ -1753,8 +1934,13 @@ class DeskControllerApp:
                 "ha_toggles": dict(getattr(self, "_ha_toggle_states", {})),
                 "ha_pending": self._ha_pending_keys(),
                 "ha_failures": list(getattr(self, "_ha_toggle_failures", set())),
+                "keypad_leds": dict(getattr(self, "_keypad_led_states", {})),
+                "keypad_pending": list(getattr(self, "_keypad_pending", set())),
+                "keypad_failures": list(getattr(self, "_keypad_failures", set())),
+                "keypad_ack": list(getattr(self, "_keypad_ack_until", {})),
+                "deck_visuals": self._status_visuals(),
                 "active_audio_device": self.active_audio_device or None,
-                "active_host": f"PC{self.current_pc + 1}",
+                "active_host": (self._observed_host() or "unknown").upper(),
                 "active_workstation": workstation_state,
                 "kvm_fault": self.kvm_fault,
             },
@@ -2111,6 +2297,10 @@ class DeskControllerApp:
                     else press_toggle(button, self.ha)
                 )
                 self._ha_toggle_states[key] = observed_state
+                if observed_state in {"active", "inactive"}:
+                    getattr(self, "_ha_last_confirmed", {}).update(
+                        {key: observed_state}
+                    )
                 with self._ha_toggle_lock:
                     if not success or (one_way and observed_state == "active"):
                         self._ha_toggle_pending.pop(group, None)
@@ -2126,6 +2316,7 @@ class DeskControllerApp:
                     logger.warning("Home Assistant state request on key %s failed", key)
             except Exception:
                 logger.exception("Home Assistant state request on key %s failed", key)
+                self._ha_toggle_states[key] = "unavailable"
                 with self._ha_toggle_lock:
                     self._ha_toggle_pending.pop(group, None)
                     self._ha_toggle_failures.add(key)
@@ -2142,11 +2333,46 @@ class DeskControllerApp:
         self._publish_streamdeck_state()
         return True
 
+    def _start_keypad_press(self, key: int, button: Dict[str, Any]) -> bool:
+        """Dispatch one programmed HA keypad tap, independently of its LED."""
+        with self._keypad_lock:
+            if key in self._keypad_pending:
+                return False
+            self._keypad_pending.add(key)
+            self._keypad_failures.discard(key)
+            self._keypad_ack_until.pop(key, None)
+
+        def run():
+            try:
+                accepted = press_keypad_button(button, self.ha)
+            except Exception:
+                logger.exception("HA keypad button on key %s failed", key)
+                accepted = False
+            with self._keypad_lock:
+                self._keypad_pending.discard(key)
+                if accepted:
+                    self._keypad_ack_until[key] = time.monotonic() + 2
+                else:
+                    self._keypad_failures.add(key)
+            # The command result is independent of the LED. Show SENT now,
+            # even if the LED remains unchanged or its read is slow/failed.
+            self._update_sd_keys()
+            self._publish_streamdeck_state()
+            if self._observe_keypad_led(key, button):
+                self._update_sd_keys()
+                self._publish_streamdeck_state()
+
+        threading.Thread(target=run, name=f"ha-keypad-{key}", daemon=True).start()
+        self._update_sd_keys()
+        self._publish_streamdeck_state()
+        return True
+
     def _handle_key_press(self, key: int):
         logger.info("Stream Deck key pressed: %s", key)
-        with self._kvm_lock:
-            button = dict(self.buttons.get(key, {}))
-            selected_workstation = self._get_active_hostname()
+        # HA/Deck presses must not wait for a slow monitor read/write holding
+        # the KVM hardware lock. Workstation-bound actions are gated below.
+        button = dict(self.buttons.get(key, {}))
+        selected_workstation = self._get_active_hostname()
         self._publish_button_event(key, button)
         if not button or not button.get("enabled", True):
             self._publish_streamdeck_state()
@@ -2158,24 +2384,29 @@ class DeskControllerApp:
         action_succeeded = False
 
         if action_type == "kvm_toggle":
-            next_pc = 1 if self.current_pc == 0 else 0
-            # Non-blocking: give an instant pending-border acknowledgment on
-            # the Stream Deck and run the transaction in the background so a
-            # slow/unreachable remote agent can't make the physical button
-            # feel unresponsive or cause repeated presses to queue up.
-            action_succeeded = self._start_kvm_switch(next_pc)
+            # Choose from fresh observed hardware state in the worker, not a
+            # cached index that manual monitor changes may have invalidated.
+            action_succeeded = self._start_kvm_switch(None)
 
         elif action_type == "kvm_select":
             requested_pc = 0 if target == "pc1" else 1 if target == "pc2" else None
             if requested_pc is None:
                 logger.error("Invalid direct KVM target on key %s", key)
-            elif requested_pc == self.current_pc and not self.kvm_fault:
+            elif (
+                requested_pc == self.current_pc
+                and not self.kvm_fault
+                and not (
+                    getattr(self.acroname, "DRIVER", "") == "none"
+                    and self._resolve_kvm_controller("monitor") == "pi"
+                    and self._resolve_kvm_controller("usb") == "pi"
+                )
+            ):
                 action_succeeded = True
             else:
                 action_succeeded = self._start_kvm_switch(requested_pc)
 
         elif action_type == "audio_output":
-            if self.kvm_fault:
+            if self.kvm_fault or getattr(self, "_kvm_switch_in_flight", False):
                 logger.error("Ignoring audio switch while KVM state is uncertain")
             elif target:
                 action_succeeded = self._queue_workstation_request(
@@ -2211,6 +2442,13 @@ class DeskControllerApp:
                 self._start_ha_toggle(key, button)
                 return
 
+        elif action_type == "ha_button":
+            if not getattr(self, "homeassistant_enabled", True):
+                logger.warning("Ignoring keypad press: Home Assistant disabled")
+            else:
+                self._start_keypad_press(key, button)
+                return
+
         elif action_type == "ha_service":
             if not getattr(self, "homeassistant_enabled", True):
                 logger.warning(
@@ -2239,7 +2477,11 @@ class DeskControllerApp:
 
         elif action_type == "workstation_slot":
             slot_id = str(button.get("slot_id", "")).strip()
-            if button.get("_slot_configured") and slot_id:
+            if (
+                not getattr(self, "_kvm_switch_in_flight", False)
+                and button.get("_slot_configured")
+                and slot_id
+            ):
                 action_succeeded = self._queue_workstation_request(
                     key,
                     selected_workstation,
@@ -2266,6 +2508,7 @@ class DeskControllerApp:
                 "ha_service",
                 "ha_toggle",
                 "ha_state_action",
+                "ha_button",
                 "kvm_select",
                 "mqtt",
                 "workstation_slot",
@@ -2277,7 +2520,54 @@ class DeskControllerApp:
         self._update_sd_keys()
         self._publish_streamdeck_state()
 
+    def _status_visual(self, key: int, button: Dict[str, Any]) -> Optional[StatusKey]:
+        action = button.get("action_type")
+        if action == "kvm_toggle":
+            return host_status(
+                self._observed_host(),
+                pending=bool(getattr(self, "_kvm_switch_in_flight", False)),
+                pending_pc=getattr(self, "_kvm_pending_target", None),
+                fault=bool(getattr(self, "kvm_fault", False)),
+            )
+        if action == "ha_toggle":
+            return ha_toggle_status(
+                button,
+                getattr(self, "_ha_toggle_states", {}).get(key, "unavailable"),
+                last_confirmed=getattr(self, "_ha_last_confirmed", {}).get(key),
+                pending=self._ha_pending_keys().get(key),
+                failed=key in getattr(self, "_ha_toggle_failures", set()),
+            )
+        if action == "ha_button":
+            return keypad_status(
+                str(button.get("label") or f"BT{key + 1}"),
+                getattr(self, "_keypad_led_states", {}).get(key, "unavailable"),
+                pending=key in getattr(self, "_keypad_pending", set()),
+                acknowledged=getattr(self, "_keypad_ack_until", {}).get(key, 0)
+                > time.monotonic(),
+                failed=key in getattr(self, "_keypad_failures", set()),
+            )
+        return None
+
+    def _status_visuals(self) -> Dict[int, Dict[str, Any]]:
+        buttons = getattr(self, "physical_buttons", {})
+        return {
+            key: presentation.as_dict()
+            for key, button in buttons.items()
+            if button.get("enabled", True)
+            and (presentation := self._status_visual(key, button)) is not None
+        }
+
     def _update_sd_keys(self):
+        """Serialize complete frames so an older render cannot finish last."""
+        lock = getattr(self, "_deck_render_lock", None)
+        if (
+            lock is None
+        ):  # Lightweight controller fixtures constructed without __init__.
+            return self._render_sd_keys()
+        with lock:
+            return self._render_sd_keys()
+
+    def _render_sd_keys(self):
         selected_workstation = self._get_active_hostname()
         selected_agent_online = self._selected_agent_online()
         rendered_at = datetime.now().astimezone()
@@ -2291,6 +2581,11 @@ class DeskControllerApp:
                     icon_type="none",
                     is_active=False,
                 )
+                continue
+
+            presentation = self._status_visual(key, button)
+            if presentation is not None:
+                self.streamdeck.render_status_key(key=key, **presentation.as_dict())
                 continue
 
             action_type = button.get("action_type", "none")
@@ -2315,23 +2610,11 @@ class DeskControllerApp:
                         str(button.get("target", "")),
                     )
                 )
-            elif action_type == "kvm_toggle":
-                switch_in_flight = self._kvm_switch_in_flight
-                is_pending = is_pending or switch_in_flight
-                if switch_in_flight:
-                    label = "SWITCHING\n..."
-                elif self.kvm_fault:
-                    label = "KVM\nERROR"
-                else:
-                    label = f"HOST\nPC {self.current_pc + 1}"
-                active = self.kvm_fault
-                if self.kvm_fault:
-                    color = (255, 60, 60)
             elif action_type == "kvm_select":
                 is_pending = bool(getattr(self, "_kvm_switch_in_flight", False))
                 active = (
                     not self.kvm_fault
-                    and str(button.get("target")) == f"pc{self.current_pc + 1}"
+                    and str(button.get("target")) == self._observed_host()
                 )
                 if self.kvm_fault:
                     color = (255, 60, 60)
@@ -2340,7 +2623,7 @@ class DeskControllerApp:
                     button.get("_agent_online") and button.get("_slot_configured")
                 )
                 active = bool(button.get("_slot_active") and is_available)
-            elif action_type in {"ha_toggle", "ha_state_action"}:
+            elif action_type == "ha_state_action":
                 state = getattr(self, "_ha_toggle_states", {}).get(key, "unavailable")
                 pending = self._ha_pending_keys().get(key)
                 failed = key in getattr(self, "_ha_toggle_failures", set())
@@ -2401,10 +2684,15 @@ class DeskControllerApp:
                 "ha_toggle",
                 "ha_state_action",
             }:
-                state = read_toggle_state(button, self.ha)
+                try:
+                    state = read_toggle_state(button, self.ha)
+                except Exception:
+                    state = "unavailable"
                 if self._ha_toggle_states.get(key) != state:
                     self._ha_toggle_states[key] = state
                     changed = True
+                if state in {"active", "inactive"}:
+                    getattr(self, "_ha_last_confirmed", {}).update({key: state})
         with self._ha_toggle_lock:
             for group, item in list(self._ha_toggle_pending.items()):
                 if item["target"] == "requesting":
@@ -2418,6 +2706,43 @@ class DeskControllerApp:
                     logger.warning("HA state request on key %s was not confirmed", key)
                     self._ha_toggle_pending.pop(group)
                     self._ha_toggle_failures.add(key)
+                    changed = True
+        if changed:
+            self._update_sd_keys()
+            self._publish_streamdeck_state()
+        return changed
+
+    def _observe_keypad_led(self, key: int, button: Dict[str, Any]) -> bool:
+        """Ignore an older HA response if a newer LED read was started."""
+        with self._keypad_lock:
+            generations = getattr(self, "_keypad_led_generation", None)
+            if generations is None:
+                generations = self._keypad_led_generation = {}
+            generation = generations.get(key, 0) + 1
+            generations[key] = generation
+        try:
+            state = read_keypad_led(button, self.ha)
+        except Exception:
+            state = "unavailable"
+        with self._keypad_lock:
+            if generations.get(key) != generation:
+                return False
+            changed = self._keypad_led_states.get(key) != state
+            self._keypad_led_states[key] = state
+            return changed
+
+    def _refresh_keypad_leds(self) -> bool:
+        """Reflect external Lutron keypad LED changes without driving the LED."""
+        if not self.homeassistant_enabled:
+            return False
+        changed = False
+        for key, button in self.physical_buttons.items():
+            if button.get("enabled", True) and button.get("action_type") == "ha_button":
+                changed = self._observe_keypad_led(key, button) or changed
+        with self._keypad_lock:
+            for key, deadline in list(self._keypad_ack_until.items()):
+                if time.monotonic() >= deadline:
+                    self._keypad_ack_until.pop(key)
                     changed = True
         if changed:
             self._update_sd_keys()
@@ -2538,20 +2863,19 @@ class DeskControllerApp:
 
         try:
             while not self._stop_event.is_set():
-                if (
-                    getattr(self.acroname, "DRIVER", "") == "none"
-                    and self._resolve_kvm_controller("usb") == "pi"
-                    and self.kvm_fault
-                    and time.monotonic() - self._last_monitor_check >= 60
-                ):
-                    self._last_monitor_check = time.monotonic()
-                    # For monitor-routed USB this only reads the monitor; it
-                    # never dispatches a remote or physical USB switch.
-                    self._start_kvm_reconcile()
+                monitor_poll_interval = 20 if self._observed_host() is None else 5
+                if time.monotonic() - self._last_monitor_check >= monitor_poll_interval:
+                    if self._start_monitor_observation():
+                        self._last_monitor_check = time.monotonic()
                 poll_interval = 2 if self._ha_toggle_pending else 10
                 if time.monotonic() - self._last_ha_toggle_poll >= poll_interval:
                     self._last_ha_toggle_poll = time.monotonic()
                     self._refresh_ha_toggles()
+                if time.monotonic() - self._last_keypad_poll >= (
+                    2 if self._keypad_ack_until else 5
+                ):
+                    self._last_keypad_poll = time.monotonic()
+                    self._refresh_keypad_leds()
                 self._refresh_datetime_buttons()
                 if self._process_pending_workstation_requests():
                     self._update_sd_keys()

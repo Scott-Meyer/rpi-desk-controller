@@ -31,6 +31,7 @@ class KVMTransactionTests(unittest.TestCase):
         controller = DeskControllerApp.__new__(DeskControllerApp)
         controller.current_pc = 0
         controller._kvm_lock = threading.RLock()
+        controller._kvm_admission_lock = threading.RLock()
         controller._remote_kvm_lock = threading.RLock()
         controller._remote_kvm_waiters = {}
         controller._kvm_request_ids = {}
@@ -94,7 +95,7 @@ class KVMTransactionTests(unittest.TestCase):
 
         controller._handle_key_press(0)
 
-        controller._start_kvm_switch.assert_called_once_with(1)
+        controller._start_kvm_switch.assert_called_once_with(None)
 
     def test_explicit_pc_keys_do_not_toggle_an_already_selected_host(self):
         controller = self.make_controller()
@@ -108,6 +109,41 @@ class KVMTransactionTests(unittest.TestCase):
         controller._start_kvm_switch.assert_not_called()
         controller._handle_key_press(3)
         controller._start_kvm_switch.assert_called_once_with(1)
+
+    def test_second_kvm_request_rejects_without_waiting_for_hardware_lock(self):
+        controller = self.make_controller()
+        started, release, answered = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+
+        def blocked_transaction(_target):
+            with controller._kvm_lock:
+                started.set()
+                release.wait(2)
+            return True
+
+        controller._switch_kvm = Mock(side_effect=blocked_transaction)
+        self.assertTrue(controller._start_kvm_switch(1))
+        self.assertTrue(started.wait(1))
+        result = []
+        second = threading.Thread(
+            target=lambda: (
+                result.append(controller._start_kvm_switch(0)),
+                answered.set(),
+            )
+        )
+        second.start()
+        try:
+            self.assertTrue(
+                answered.wait(0.3), "A second request blocked the MQTT/deck callback"
+            )
+            self.assertEqual(result, [False])
+        finally:
+            release.set()
+            second.join(timeout=2)
+            controller._kvm_worker.join(timeout=2)
 
     def test_repeated_kvm_key_presses_do_not_queue_up(self):
         # A switch already in flight must cause extra presses to be ignored,
@@ -555,6 +591,116 @@ class KVMTransactionTests(unittest.TestCase):
         self.assertFalse(controller.monitor.verify_writes)
         self.assertTrue(controller.monitor.use_alt_addressing)
 
+    def test_manual_monitor_change_updates_host_without_a_deck_press(self):
+        controller = self.make_controller()
+        controller.acroname = MonitorOnlyUSBController()
+        controller.config["monitors"][0]["inputs"] = {
+            "pc1": "0x05",
+            "pc2": "0x06",
+            "pi": "0x01",
+        }
+        controller._monitor_source = "pc1"
+        controller._kvm_switch_in_flight = False
+        controller._monitor_generation = 0
+        controller._refresh_workstation_deck = Mock()
+        controller._publish_streamdeck_layout = Mock()
+        controller.monitor.get_input_source.return_value = 0x06
+
+        self.assertTrue(controller._observe_monitor_source())
+        self.assertEqual(
+            (controller.current_pc, controller._monitor_source), (1, "pc2")
+        )
+        self.assertEqual(controller._observed_host(), "pc2")
+        controller.monitor.set_input_source.assert_not_called()
+        self.assertIn(
+            call("desk/kvm/state", "PC2", retain=True),
+            controller.mqtt.publish.call_args_list,
+        )
+
+    def test_duplicate_raw_monitor_mapping_never_claims_a_host_or_writes_input(self):
+        controller = self.make_controller()
+        controller.config["monitors"][0]["inputs"] = {
+            "pc1": "0x05",
+            "pc2": "0x05",
+            "pi": "0x01",
+        }
+        self.assertEqual(controller._monitor_source_for_input(0x05), "unknown")
+        self.assertFalse(controller._kvm_monitor_set("pi", 1, uuid4()))
+        controller.monitor.set_input_source.assert_not_called()
+
+    def test_direct_select_from_pi_does_not_skip_cached_pc(self):
+        controller = self.make_controller()
+        controller.acroname = MonitorOnlyUSBController()
+        controller._monitor_source = "pi"
+        controller.current_pc = 0
+        controller._start_kvm_switch = Mock(return_value=True)
+        controller.buttons = {
+            0: {"enabled": True, "action_type": "kvm_select", "target": "pc1"}
+        }
+
+        controller._handle_key_press(0)
+        controller._start_kvm_switch.assert_called_once_with(0)
+
+    def test_pi_input_has_a_known_first_destination(self):
+        controller = self.make_controller()
+        controller.acroname = MonitorOnlyUSBController()
+        controller.config["monitors"][0]["inputs"] = {
+            "pc1": "0x05",
+            "pc2": "0x06",
+            "pi": "0x01",
+        }
+        controller._monitor_source = "pi"
+        controller._kvm_switch_in_flight = False
+        controller._switch_kvm = Mock(return_value=True)
+        controller.monitor.get_input_source.return_value = 0x01
+
+        self.assertTrue(controller._start_kvm_switch(None))
+        controller._kvm_worker.join(timeout=2)
+        controller._switch_kvm.assert_called_once_with(0)
+        self.assertEqual(
+            controller._monitor_source, "pi"
+        )  # Result comes from actual switch.
+
+    def test_slow_monitor_observation_does_not_block_an_ha_press(self):
+        controller = self.make_controller()
+        controller.acroname = MonitorOnlyUSBController()
+        controller.config["monitors"][0]["inputs"] = {
+            "pc1": "0x05",
+            "pc2": "0x06",
+            "pi": "0x01",
+        }
+        controller._monitor_source = "pc1"
+        controller._monitor_generation = 0
+        controller._kvm_switch_in_flight = False
+        started, release, dispatched = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+
+        def slow_read():
+            started.set()
+            release.wait(2)
+            return 0x05
+
+        controller.monitor.get_input_source.side_effect = slow_read
+        controller._start_ha_toggle = Mock(return_value=True)
+        controller.buttons = {1: {"enabled": True, "action_type": "ha_toggle"}}
+        observer = threading.Thread(target=controller._observe_monitor_source)
+        observer.start()
+        self.assertTrue(started.wait(1))
+        key_press = threading.Thread(
+            target=lambda: (controller._handle_key_press(1), dispatched.set())
+        )
+        key_press.start()
+        try:
+            self.assertTrue(dispatched.wait(0.5))
+            controller._start_ha_toggle.assert_called_once()
+        finally:
+            release.set()
+            observer.join(timeout=2)
+            key_press.join(timeout=2)
+
     def test_monitor_routed_usb_commits_only_confirmed_monitor_input(self):
         controller = self.make_controller()
         controller.acroname = MonitorOnlyUSBController()
@@ -766,7 +912,7 @@ class KVMTransactionTests(unittest.TestCase):
             request.model_dump_json(),
         )
 
-        controller._start_kvm_switch.assert_called_once_with(1)
+        controller._start_kvm_switch.assert_called_once_with(None)
 
     def test_duplicate_hotkey_request_is_ignored(self):
         controller = self.make_controller()
@@ -779,7 +925,7 @@ class KVMTransactionTests(unittest.TestCase):
         controller._on_mqtt_message("desk/kvm/request", request)
         controller._on_mqtt_message("desk/kvm/request", request)
 
-        controller._start_kvm_switch.assert_called_once_with(1)
+        controller._start_kvm_switch.assert_called_once_with(None)
 
     def test_remote_step_waits_for_exact_correlated_result(self):
         controller = self.make_controller()
@@ -849,6 +995,31 @@ class KVMTransactionTests(unittest.TestCase):
         self.assertEqual(status_calls[0].args[1]["lan_ip"], "192.168.50.30")
         self.assertEqual(status_calls[0].args[1]["hostname"], "desk-pi")
         self.assertTrue(status_calls[0].kwargs["retain"])
+
+    @patch(
+        "desk_controller.pi_controller.main.get_lan_ip", return_value="192.168.50.30"
+    )
+    def test_reconnect_publishes_observed_pi_unknown_or_pc_not_stale_cached_host(
+        self, _ip
+    ):
+        for source, fault, expected, availability in (
+            ("pi", False, "PI", "offline"),
+            ("unknown", True, "UNKNOWN", "offline"),
+            ("pc2", False, "PC2", "online"),
+        ):
+            with self.subTest(source=source):
+                controller = self.make_controller()
+                controller._monitor_source = source
+                controller.kvm_fault = fault
+                controller._on_mqtt_connected()
+                self.assertIn(
+                    call("desk/kvm/state", expected, retain=True),
+                    controller.mqtt.publish.call_args_list,
+                )
+                self.assertIn(
+                    call("desk/kvm/availability", availability, retain=True),
+                    controller.mqtt.publish.call_args_list,
+                )
 
     def test_every_physical_button_press_is_published_to_mqtt(self):
         controller = self.make_controller()
@@ -976,7 +1147,7 @@ class KVMTransactionTests(unittest.TestCase):
             controller._handle_key_press(1)
             self.assertTrue(started.wait(1))
             controller._handle_key_press(0)
-            controller._start_kvm_switch.assert_called_once_with(1)
+            controller._start_kvm_switch.assert_called_once_with(None)
             controller._handle_key_press(1)
             controller._handle_key_press(
                 2
