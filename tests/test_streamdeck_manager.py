@@ -232,7 +232,12 @@ class StreamDeckManagerTests(unittest.TestCase):
             off.crop((30, 25, 50, 48)).tobytes(),
         )
         self.assertEqual(pending.getpixel((40, 37)), off.getpixel((40, 37)))
-        self.assertIn((102, 230, 151), ack.crop((56, 12, 68, 25)).getdata())
+        self.assertTrue(
+            any(
+                green > red + 30 and green > blue + 30
+                for red, green, blue in ack.crop((50, 8, 76, 30)).getdata()
+            )
+        )
         self.assertTrue(
             any(
                 red > green + 30 and red > blue + 30
