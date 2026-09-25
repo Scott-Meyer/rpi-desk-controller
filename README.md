@@ -94,12 +94,10 @@ The Pi publishes its physical controls and USB hub under
   `reset_data`, `reset_power`, and `clear_errors` actions are also supported.
   Per-port JSON state and simple `ON`/`OFF` state are retained beside it.
 
-The Version & Updates tab shows the running source revision, GitHub's current
-default-branch revision, and the latest release separately. SSH deployment stamps
-the exact source it transfers; an unknown revision or a failed GitHub lookup
-is never presented as up to date. Update the Pi from a trusted checkout with
-`scripts/deploy.sh`; the old web release-tag updater cannot safely update an
-rsynced installation and is disabled.
+The Version & Updates tab distinguishes the running source, GitHub's default
+branch, and published releases. Neither an unknown revision nor a failed GitHub
+lookup is presented as up to date. An administrator can manually install a
+newer Pi-capable release there; merely publishing a release never updates a Pi.
 
 When enabled, Home Assistant MQTT discovery registers every physical Stream Deck key as
 a device trigger. Each controllable Acroname USB port receives switches for
@@ -409,8 +407,10 @@ an exact MQTT feedback topic and active payload.
 ## Deploying updates to the Pi
 
 Run the deployment script from any directory. It synchronizes application
-sources without copying or deleting `config/config.yaml` or `venv`, reinstalls
-the Pi dependency set, and restarts an installed service.
+sources without copying or deleting `config/config.yaml`, installs Pi
+dependencies, and restarts an installed service. On a Pi previously updated
+through the web, SSH deployment builds a separate environment rather than
+modifying an installed release slot.
 
 ```bash
 ./scripts/deploy.sh user@rpi-host
@@ -418,6 +418,20 @@ the Pi dependency set, and restarts an installed service.
 ```
 
 Run `scripts/setup_rpi.sh` on the Pi once before using remote deployment.
+The SSH setup/deployer creates an update administrator credential at
+`config/.update/admin-token` without displaying it in deployment logs. Read
+it over SSH and enter it when the System tab asks. The existing LAN UI uses
+HTTP, so do not enter this credential on a network you do not trust.
+
+**Install update** selects only the latest stable GitHub release with a Pi
+source archive. It verifies the tag's commit, release manifest, and archive
+checksum; prepares dependencies outside the live installation; then restarts
+under systemd. `config/config.yaml` is never part of the archive. The System
+tab shows installation progress and reports a failed install after the old
+controller returns. If the new controller does not start its web interface,
+the next service start selects the previous environment. For a failed or
+interrupted SSH deployment, inspect the Pi over SSH before removing
+`config/.update/manual-deploy.lock`; web installs stay blocked until then.
 
 ## Building desktop releases
 
@@ -458,9 +472,10 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The release workflow rejects mismatched tags, builds both platforms through
-the local build scripts, publishes the `.exe` and `.dmg`, and attaches SHA-256
-checksums.
+The release workflow rejects mismatched tags, builds both desktop platforms
+and an exact-commit Pi source archive, and publishes these assets with a Pi
+source manifest and SHA-256 checksums. Publishing does not install the Pi
+archive; an administrator must choose **Install update** on that Pi.
 
 ## Security, contributing, and license
 

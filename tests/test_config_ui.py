@@ -625,13 +625,42 @@ audio_devices: {}
             self.assertIsNone(res["update_available"])
             self.assertEqual(res["source_status"], "unknown")
 
-    def test_web_update_cannot_apply_a_release_to_an_rsync_installation(self):
-        payload = SystemUpdatePayload(target_tag="v99.0.0")
+    def test_web_update_requires_ssh_provisioned_credential_and_rejects_arbitrary_tag(
+        self,
+    ):
+        updater = Mock()
+        updater.authenticate.side_effect = lambda token: token == "valid-secret"
+        configure_config_ui(
+            self.config_path, self.restart, release_update_service=updater
+        )
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/system/update",
+                "headers": [(b"x-desk-update-token", b"wrong-secret")],
+            }
+        )
         with self.assertRaises(HTTPException) as raised:
-            apply_system_update(payload)
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertIn("scripts/deploy.sh", str(raised.exception.detail))
-        self.restart.assert_not_called()
+            apply_system_update(request)
+        self.assertEqual(raised.exception.status_code, 403)
+        updater.request_latest.assert_not_called()
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/system/update",
+                "headers": [(b"x-desk-update-token", b"valid-secret")],
+            }
+        )
+        with self.assertRaises(HTTPException) as raised:
+            apply_system_update(request, SystemUpdatePayload(target_tag="v99.0.0"))
+        self.assertEqual(raised.exception.status_code, 400)
+        updater.request_latest.assert_not_called()
+        updater.request_latest.return_value = {"status": "accepted", "tag": "v1.2.1"}
+        self.assertEqual(apply_system_update(request)["status"], "accepted")
+        updater.request_latest.assert_called_once()
 
     def test_restart_system_service(self):
         restart_mock = Mock()

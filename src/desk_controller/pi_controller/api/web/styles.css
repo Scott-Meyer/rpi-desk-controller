@@ -534,6 +534,12 @@ input[type="color"] { padding: 4px; }
 .message-error { color: var(--danger) !important; }
 .message-success { color: var(--green) !important; }
 .note { margin: 18px 0 0; font-size: 13px; line-height: 1.55; }
+#systemVersionCard { margin-top: 14px; }
+.system-actions { display: flex; gap: 12px; margin-top: 20px; align-items: center; flex-wrap: wrap; }
+.system-actions button { min-width: 118px; padding: 11px 16px; border-radius: 10px; cursor: pointer; }
+.system-actions button:disabled { cursor: not-allowed; opacity: .55; }
+.system-actions #restartServiceBtn { margin-left: auto; }
+.system-update-message { margin-top: 12px; }
 
 @media (max-width: 680px) {
   .shell { width: min(100% - 20px, 980px); padding-top: 28px; }

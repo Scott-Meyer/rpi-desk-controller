@@ -9,6 +9,7 @@ import platform
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import UUID, uuid4
 
@@ -72,6 +73,7 @@ from desk_controller.pi_controller.ha_toggle import (
     read_toggle_state,
 )
 from desk_controller.pi_controller.integrations.homeassistant import HomeAssistantClient
+from desk_controller.pi_controller.release_update import PiReleaseUpdate
 from desk_controller.pi_controller.streamdeck_layout import (
     DYNAMIC_DATETIME_ACTIONS,
     MAX_STREAMDECK_KEY_COUNT,
@@ -262,6 +264,7 @@ class DeskControllerApp:
             self._control_usb_hub_port,
             self._control_usb_hub,
         )
+        self._release_update = PiReleaseUpdate(Path.cwd(), self._request_restart)
         configure_config_ui(
             self.config_path,
             restart_callback=self._request_restart,
@@ -269,6 +272,7 @@ class DeskControllerApp:
             streamdeck_layout_provider=self.streamdeck.layout,
             streamdeck_visual_provider=self._status_visuals,
             streamdeck_image_size_provider=self.streamdeck.key_image_size,
+            release_update_service=self._release_update,
         )
 
     def _connection_status(self) -> Dict[str, Any]:
@@ -2778,17 +2782,26 @@ class DeskControllerApp:
                 "firewall protect this endpoint.",
                 host,
             )
-        api_thread = threading.Thread(
-            target=uvicorn.run,
-            kwargs={
-                "app": app,
-                "host": host,
-                "port": port,
-                "log_level": "warning",
-            },
-            daemon=True,
+        self._api_server = uvicorn.Server(
+            uvicorn.Config(app=app, host=host, port=port, log_level="warning")
         )
-        api_thread.start()
+        self._api_thread = threading.Thread(target=self._serve_api, daemon=True)
+        self._api_thread.start()
+
+    def _serve_api(self) -> None:
+        try:
+            self._api_server.run()
+        except (Exception, SystemExit):
+            logger.exception("HTTP server stopped unexpectedly")
+
+    def _api_ready(self) -> bool:
+        """Uvicorn has completed startup and is still serving requests."""
+        return bool(
+            getattr(self, "_api_server", None)
+            and self._api_server.started
+            and getattr(self, "_api_thread", None)
+            and self._api_thread.is_alive()
+        )
 
     def run(self):
         logger.info("Starting MQTT Desk Controller Application...")
@@ -2847,6 +2860,8 @@ class DeskControllerApp:
         mqtt_started = self.mqtt.start()
         if not mqtt_started:
             logger.error("MQTT network loop failed to start")
+            if self._release_update.status().get("state") == "awaiting_health":
+                raise RuntimeError("New release could not start the MQTT network loop")
         elif not self.mqtt.wait_until_connected(timeout=10):
             logger.warning(
                 "MQTT did not connect within 10 seconds; retrying in background"
@@ -2854,9 +2869,20 @@ class DeskControllerApp:
         if local_usb_ready:
             self._reconcile_kvm_state()
         self._last_monitor_check = time.monotonic()
+        update_health_after = time.monotonic() + 15
 
         try:
             while not self._stop_event.is_set():
+                if update_health_after and time.monotonic() >= update_health_after:
+                    if self._release_update.status().get("state") == "awaiting_health":
+                        if not self._api_ready():
+                            raise RuntimeError(
+                                "New release could not start the web interface"
+                            )
+                        if self._release_update.mark_healthy():
+                            update_health_after = None
+                    else:
+                        update_health_after = None
                 monitor_poll_interval = 20 if self._observed_host() is None else 5
                 if time.monotonic() - self._last_monitor_check >= monitor_poll_interval:
                     if self._start_monitor_observation():

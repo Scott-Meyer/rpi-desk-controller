@@ -8,9 +8,15 @@ Type=simple
 User=@SERVICE_USER@
 Group=@SERVICE_GROUP@
 WorkingDirectory=@PROJECT_DIR@
-ExecStart=@PROJECT_DIR@/venv/bin/python -m desk_controller.pi_controller.main
+# The pre-start installer is independent of the controller process. It can
+# restore the previous venv before another attempt if a new release fails.
+ExecStartPre=/usr/bin/python3 @PROJECT_DIR@/scripts/rpi_update_bootstrap.py @PROJECT_DIR@
+# The stable parent enforces a health deadline even if candidate imports hang.
+ExecStart=/usr/bin/python3 @PROJECT_DIR@/scripts/rpi_update_supervisor.py @PROJECT_DIR@
 Restart=always
 RestartSec=5
+# Source download and dependency installation run in ExecStartPre.
+TimeoutStartSec=20min
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077

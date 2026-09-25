@@ -16,11 +16,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from desk_controller import __version__, source_version
 from desk_controller.config import load_config, save_config
 from desk_controller.desktop_agent.updater import GitHubReleaseUpdater
+from desk_controller.pi_controller import release_source
 from desk_controller.pi_controller.drivers.streamdeck_mgr import StreamDeckManager
 from desk_controller.pi_controller.ha_toggle import (
     action_targets_observed,
     toggle_targets_observed,
 )
+from desk_controller.pi_controller.release_update import PiReleaseUpdate, UpdateConflict
 from desk_controller.pi_controller.streamdeck_layout import (
     configured_streamdeck_buttons,
     configured_usb_ports,
@@ -39,6 +41,7 @@ _STREAMDECK_VISUAL_PROVIDER: Optional[Callable[[], Dict[int, Dict[str, Any]]]] =
 _STREAMDECK_IMAGE_SIZE_PROVIDER: Optional[Callable[[], Optional[Tuple[int, int]]]] = (
     None
 )
+_RELEASE_UPDATE_SERVICE: Optional[PiReleaseUpdate] = None
 _WEB_ROOT = Path(__file__).with_name("web")
 _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _INPUT_PATTERN = re.compile(r"^(?:0x)?[0-9A-Fa-f]{1,2}$")
@@ -486,17 +489,19 @@ def configure_config_ui(
     streamdeck_image_size_provider: Optional[
         Callable[[], Optional[Tuple[int, int]]]
     ] = None,
+    release_update_service: Optional[PiReleaseUpdate] = None,
 ) -> None:
     """Connect the web editor to the controller's active config file."""
     global _CONFIG_PATH, _RESTART_CALLBACK, _CONNECTION_STATUS_PROVIDER
     global _STREAMDECK_LAYOUT_PROVIDER, _STREAMDECK_VISUAL_PROVIDER
-    global _STREAMDECK_IMAGE_SIZE_PROVIDER
+    global _STREAMDECK_IMAGE_SIZE_PROVIDER, _RELEASE_UPDATE_SERVICE
     _CONFIG_PATH = Path(config_path)
     _RESTART_CALLBACK = restart_callback
     _CONNECTION_STATUS_PROVIDER = connection_status_provider
     _STREAMDECK_LAYOUT_PROVIDER = streamdeck_layout_provider
     _STREAMDECK_VISUAL_PROVIDER = streamdeck_visual_provider
     _STREAMDECK_IMAGE_SIZE_PROVIDER = streamdeck_image_size_provider
+    _RELEASE_UPDATE_SERVICE = release_update_service
 
 
 def _canonical_host(value: str) -> str:
@@ -965,18 +970,59 @@ def get_system_version():
     }
 
 
+@router.get(
+    "/api/v1/system/update/availability",
+    dependencies=[Depends(_require_lan_request)],
+)
+def get_pi_update_availability():
+    if _RELEASE_UPDATE_SERVICE is None:
+        raise HTTPException(status_code=503, detail="Pi updater is unavailable")
+    return _RELEASE_UPDATE_SERVICE.availability()
+
+
+@router.get(
+    "/api/v1/system/update/status",
+    dependencies=[Depends(_require_lan_request)],
+)
+def get_pi_update_status():
+    if _RELEASE_UPDATE_SERVICE is None:
+        raise HTTPException(status_code=503, detail="Pi updater is unavailable")
+    try:
+        return _RELEASE_UPDATE_SERVICE.status()
+    except (UpdateConflict, OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.post(
     "/api/v1/system/update",
     dependencies=[Depends(_require_same_origin)],
+    status_code=202,
 )
-def apply_system_update(payload: Optional[SystemUpdatePayload] = None):
-    # Historically this checked out a release tag in an unrelated/stale .git
-    # directory. The deployer uses rsync, so that checkout cannot prove what
-    # source the running controller actually received. Fail closed.
-    raise HTTPException(
-        status_code=409,
-        detail="Use scripts/deploy.sh from a trusted checkout to update this Pi; the web updater cannot verify deployed source.",
-    )
+def apply_system_update(
+    request: Request, payload: Optional[SystemUpdatePayload] = None
+):
+    if _RELEASE_UPDATE_SERVICE is None:
+        raise HTTPException(status_code=503, detail="Pi updater is unavailable")
+    if not _RELEASE_UPDATE_SERVICE.authenticate(
+        request.headers.get("X-Desk-Update-Token", "")
+    ):
+        raise HTTPException(
+            status_code=403, detail="Update administrator credential required"
+        )
+    if payload and payload.target_tag is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Only the latest verified Pi release can be installed",
+        )
+    try:
+        return _RELEASE_UPDATE_SERVICE.request_latest()
+    except (UpdateConflict, release_source.UnsupportedRelease) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (release_source.ReleaseSourceError, OSError, ValueError) as exc:
+        logger.warning("Pi update request failed: %s", exc)
+        raise HTTPException(
+            status_code=503, detail="Could not verify or schedule Pi update"
+        ) from exc
 
 
 @router.post(

@@ -1,4 +1,4 @@
-name: Build & Release Desktop Agents
+name: Build & Release Desk Controller
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: desk-controller-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -40,6 +40,46 @@ jobs:
           ruff format --check .
           bandit -q -r src -ll
           python -m unittest discover -s tests
+
+  build-pi-source:
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Archive exact Pi source and record its identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          commit="$(git rev-parse HEAD)"
+          git archive --format=tar.gz --output=dist/DeskController-Pi-source.tar.gz "$commit" \
+            README.md LICENSE THIRD_PARTY_NOTICES.md pyproject.toml requirements.txt \
+            config/config.example.yaml scripts src systemd
+          python3 - "$commit" "$GITHUB_REF_NAME" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          commit, tag = sys.argv[1:]
+          archive = Path("dist/DeskController-Pi-source.tar.gz")
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          Path("dist/DeskController-Pi-source.json").write_text(
+              json.dumps({"schema": 1, "tag": tag, "commit": commit,
+                          "archive_sha256": digest}) + "\n"
+          )
+          PY
+
+      - name: Upload Pi source artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: DeskController-Pi-source
+          path: |
+            dist/DeskController-Pi-source.tar.gz
+            dist/DeskController-Pi-source.json
+          if-no-files-found: error
 
   build-windows:
     needs: validate-version
@@ -88,7 +128,7 @@ jobs:
 
   create-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-macos]
+    needs: [build-pi-source, build-windows, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -105,10 +145,16 @@ jobs:
           name: DeskAgent-macOS
           path: dist/
 
+      - name: Download Pi source artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: DeskController-Pi-source
+          path: dist/
+
       - name: Create checksums
         run: |
           cd dist
-          sha256sum DeskAgent-Windows.exe DeskAgent-macOS.dmg > SHA256SUMS.txt
+          sha256sum DeskAgent-Windows.exe DeskAgent-macOS.dmg DeskController-Pi-source.tar.gz DeskController-Pi-source.json > SHA256SUMS.txt
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
@@ -118,4 +164,6 @@ jobs:
           files: |
             dist/DeskAgent-Windows.exe
             dist/DeskAgent-macOS.dmg
+            dist/DeskController-Pi-source.tar.gz
+            dist/DeskController-Pi-source.json
             dist/SHA256SUMS.txt

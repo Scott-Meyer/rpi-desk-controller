@@ -1024,6 +1024,105 @@ async function checkSystemVersion() {
     byId("githubCommit").textContent = "Unknown";
     byId("githubRelease").textContent = "Unknown";
   }
+  await checkPiUpdateAvailability();
+}
+
+let installablePiTag = null;
+let piUpdateActive = false;
+
+function showPiUpdateStatus(status) {
+  const msg = byId("updateMessage");
+  if (status.state === "idle") return;
+  msg.textContent = status.message || `Update ${status.state}`;
+  msg.style.color = status.state === "failed" ? "var(--danger)" : "var(--cyan)";
+  if (["requested", "staging", "switching", "awaiting_health"].includes(status.state)) {
+    piUpdateActive = true;
+    byId("installPiUpdateBtn").disabled = true;
+    byId("piUpdateAvailability").textContent = "Installation is in progress; this page may briefly disconnect.";
+    pollPiUpdateStatus();
+  } else {
+    piUpdateActive = false;
+  }
+}
+
+async function checkPiUpdateAvailability() {
+  const btn = byId("installPiUpdateBtn");
+  const availability = byId("piUpdateAvailability");
+  btn.disabled = true;
+  installablePiTag = null;
+  try {
+    const statusResponse = await fetch("/api/v1/system/update/status", { cache: "no-store" });
+    if (statusResponse.ok) showPiUpdateStatus(await statusResponse.json());
+    if (piUpdateActive) return;
+    const response = await fetch("/api/v1/system/update/availability", { cache: "no-store" });
+    if (!response.ok) throw new Error("Could not check Pi release availability");
+    const data = await response.json();
+    if (data.available) {
+      installablePiTag = data.tag;
+      btn.disabled = false;
+      availability.textContent = `${data.tag} can be installed on this Pi.`;
+    } else {
+      availability.textContent = data.reason || "No installable Pi update is available.";
+    }
+  } catch (error) {
+    availability.textContent = error.message;
+  }
+}
+
+async function pollPiUpdateStatus() {
+  if (window.piUpdatePolling) return;
+  window.piUpdatePolling = true;
+  const msg = byId("updateMessage");
+  for (let attempt = 0; attempt < 600; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    try {
+      const response = await fetch("/api/v1/system/update/status", { cache: "no-store" });
+      if (!response.ok) continue;
+      const status = await response.json();
+      msg.textContent = status.message || `Update ${status.state}`;
+      msg.style.color = status.state === "failed" ? "var(--danger)" : "var(--cyan)";
+      if (status.state === "completed" || status.state === "failed") {
+        piUpdateActive = false;
+        window.piUpdatePolling = false;
+        if (status.state === "completed") {
+          window.location.reload();
+        } else {
+          await checkPiUpdateAvailability();
+        }
+        return;
+      }
+    } catch {
+      msg.textContent = "Controller is restarting or preparing the update; reconnecting…";
+    }
+  }
+  msg.textContent = "Update status timed out. Reopen this page or check the Pi service over SSH.";
+  window.piUpdatePolling = false;
+}
+
+async function installPiUpdate() {
+  if (!installablePiTag || piUpdateActive) return;
+  if (!confirm(`Install ${installablePiTag} from GitHub now? The controller will restart; configuration is preserved.`)) return;
+  const credential = prompt("Enter the Pi update administrator credential (read config/.update/admin-token over SSH):");
+  if (!credential) return;
+  const btn = byId("installPiUpdateBtn");
+  const msg = byId("updateMessage");
+  btn.disabled = true;
+  try {
+    const response = await fetch("/api/v1/system/update", {
+      method: "POST",
+      headers: { "X-Desk-Update-Token": credential },
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || "Update request failed");
+    piUpdateActive = true;
+    msg.style.color = "var(--cyan)";
+    msg.textContent = `Preparing ${result.tag}; the controller will restart…`;
+    pollPiUpdateStatus();
+  } catch (error) {
+    btn.disabled = false;
+    msg.style.color = "var(--danger)";
+    msg.textContent = `Update was not started: ${error.message}`;
+  }
 }
 
 async function restartSystemService() {
@@ -1060,6 +1159,7 @@ async function restartSystemService() {
 }
 
 byId("checkUpdatesBtn")?.addEventListener("click", checkSystemVersion);
+byId("installPiUpdateBtn")?.addEventListener("click", installPiUpdate);
 byId("restartServiceBtn")?.addEventListener("click", restartSystemService);
 
 fetch("/api/v1/config", { cache: "no-store" })

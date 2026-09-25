@@ -1,8 +1,7 @@
 # Release and publication checklist
 
-This checklist separates making the source repository public from publishing
-desktop binaries. Neither operation should be inferred from ordinary code
-changes.
+Publishing a release makes installer assets available; it never updates a Pi
+without an administrator choosing **Install update** on that Pi.
 
 ## Public repository
 
@@ -29,12 +28,23 @@ changes.
 6. Add the repository description and topics, and verify the security-reporting
    link in `SECURITY.md` while signed out.
 
+## Pi update readiness
+
+Before tagging, deploy the updater itself from a trusted checkout to the intended
+Pi. Verify its administrator credential is provisioned over SSH, the System tab
+shows the current version, and no code is installed automatically. Preserve a
+backup of `config/config.yaml`. Check the source-archive artifact produced by
+the manual workflow run; the web installer must reject older releases that lack
+Pi assets. Exercise staging failure and restart rollback before relying on the
+button for an actual published release. If installation fails, the Pi should
+show why it returned to the previous version.
+
 ## Desktop release
 
 1. Update the package version and replace `Unreleased` in `CHANGELOG.md` with
    the release date.
-2. Run **Build & Release Desktop Agents** manually against the intended commit.
-   Manual runs build and upload both platform artifacts but do not create a
+2. Run **Build & Release Desk Controller** manually against the intended commit.
+   Manual runs build and upload desktop and Pi artifacts but do not create a
    GitHub release.
 3. Download the Windows executable and macOS disk image from that workflow run.
    Smoke-test installation, first-run MQTT setup, reconnect behavior, tray
@@ -44,4 +54,6 @@ changes.
 5. Document that Windows artifacts are unsigned and macOS artifacts are
    ad-hoc-signed and not notarized until production signing is configured.
 6. Create the matching version tag only after the checks above. Pushing a
-   `v*` tag publishes the release and its SHA-256 checksums.
+   `v*` tag publishes desktop binaries, the Pi source archive and manifest,
+   and their SHA-256 checksums. Test an actual manual installation on the Pi
+   before treating the release-update experience as proven.

@@ -372,7 +372,7 @@
             <span id="versionStatusBadge" class="status">Checking GitHub…</span>
           </div>
 
-          <div id="systemVersionCard" class="connection-health checking" style="margin-top: 14px;">
+          <div id="systemVersionCard" class="connection-health checking system-version-card">
             <span class="health-dot" aria-hidden="true"></span>
             <div>
               <strong id="currentVersionText">Reading installed source…</strong>
@@ -383,13 +383,16 @@
           <p class="note">Running source: <span id="runningCommit">Unknown</span></p>
           <p class="note">Latest GitHub default branch: <span id="githubCommit">Checking…</span></p>
           <p class="note">Latest published release: <span id="githubRelease">Checking…</span></p>
-          <p class="note">To update source, deploy from a trusted checkout with <code>scripts/deploy.sh</code>. GitHub releases can lag the default branch; this page does not install code.</p>
+          <p class="note">Install a published, verified Pi release manually; the controller will restart and keep your configuration. If the new controller fails to start, the previous installation is restored. The default branch may be newer than the latest release.</p>
+          <p class="note">The Install button asks for an administrator credential provisioned on this Pi. An SSH administrator can read it with <code>cat ~/rpi-desk-controller/config/.update/admin-token</code>. Do not share it on an untrusted network.</p>
 
-          <div style="display: flex; gap: 12px; margin-top: 20px; align-items: center;">
+          <div class="system-actions">
             <button type="button" id="checkUpdatesBtn" class="secondary">Check GitHub</button>
-            <button type="button" id="restartServiceBtn" class="secondary" style="margin-left: auto;">Restart Service</button>
+            <button type="button" id="installPiUpdateBtn" class="primary" disabled>Install update</button>
+            <button type="button" id="restartServiceBtn" class="secondary">Restart Service</button>
           </div>
-          <p id="updateMessage" class="note" style="margin-top: 12px;"></p>
+          <p id="piUpdateAvailability" class="note" role="status">Checking Pi release availability…</p>
+          <p id="updateMessage" class="note system-update-message" role="status"></p>
         </section>
 
         <footer class="actions">

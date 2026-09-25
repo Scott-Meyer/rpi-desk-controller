@@ -24,6 +24,11 @@ if [[ "$PROJECT_DIR" == *" "* ]]; then
     exit 2
 fi
 
+if [[ -L "$PROJECT_DIR/venv" ]]; then
+    echo "This Pi uses release-managed environments; use scripts/deploy.sh for manual deployment." >&2
+    exit 2
+fi
+
 echo "=== Installing system dependencies ==="
 sudo apt-get update
 sudo apt-get install -y \
@@ -59,6 +64,12 @@ if [[ ! -f "$PROJECT_DIR/config/config.yaml" ]]; then
         "$PROJECT_DIR/config/config.example.yaml" \
         "$PROJECT_DIR/config/config.yaml"
     echo "Created $PROJECT_DIR/config/config.yaml."
+fi
+if [[ "$(id -u)" -eq 0 && "$SERVICE_USER" != root ]]; then
+    sudo install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 "$PROJECT_DIR/config/.update"
+    sudo -u "$SERVICE_USER" python3 "$PROJECT_DIR/scripts/rpi_update_credential.py" "$PROJECT_DIR"
+else
+    python3 "$PROJECT_DIR/scripts/rpi_update_credential.py" "$PROJECT_DIR"
 fi
 
 echo "=== Configuring optional Pi-hosted MQTT broker ==="
