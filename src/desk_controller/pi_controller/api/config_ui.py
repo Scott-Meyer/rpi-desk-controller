@@ -4,17 +4,19 @@ import ipaddress
 import logging
 import re
 import threading
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from desk_controller import __version__, source_version
 from desk_controller.config import load_config, save_config
 from desk_controller.desktop_agent.updater import GitHubReleaseUpdater
+from desk_controller.pi_controller.drivers.streamdeck_mgr import StreamDeckManager
 from desk_controller.pi_controller.ha_toggle import (
     action_targets_observed,
     toggle_targets_observed,
@@ -33,6 +35,10 @@ _CONFIG_PATH: Optional[Path] = None
 _RESTART_CALLBACK: Optional[Callable[[], None]] = None
 _CONNECTION_STATUS_PROVIDER: Optional[Callable[[], Dict[str, Any]]] = None
 _STREAMDECK_LAYOUT_PROVIDER: Optional[Callable[[], Optional[Tuple[int, int]]]] = None
+_STREAMDECK_VISUAL_PROVIDER: Optional[Callable[[], Dict[int, Dict[str, Any]]]] = None
+_STREAMDECK_IMAGE_SIZE_PROVIDER: Optional[Callable[[], Optional[Tuple[int, int]]]] = (
+    None
+)
 _WEB_ROOT = Path(__file__).with_name("web")
 _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _INPUT_PATTERN = re.compile(r"^(?:0x)?[0-9A-Fa-f]{1,2}$")
@@ -474,14 +480,23 @@ def configure_config_ui(
     streamdeck_layout_provider: Optional[
         Callable[[], Optional[Tuple[int, int]]]
     ] = None,
+    streamdeck_visual_provider: Optional[
+        Callable[[], Dict[int, Dict[str, Any]]]
+    ] = None,
+    streamdeck_image_size_provider: Optional[
+        Callable[[], Optional[Tuple[int, int]]]
+    ] = None,
 ) -> None:
     """Connect the web editor to the controller's active config file."""
     global _CONFIG_PATH, _RESTART_CALLBACK, _CONNECTION_STATUS_PROVIDER
-    global _STREAMDECK_LAYOUT_PROVIDER
+    global _STREAMDECK_LAYOUT_PROVIDER, _STREAMDECK_VISUAL_PROVIDER
+    global _STREAMDECK_IMAGE_SIZE_PROVIDER
     _CONFIG_PATH = Path(config_path)
     _RESTART_CALLBACK = restart_callback
     _CONNECTION_STATUS_PROVIDER = connection_status_provider
     _STREAMDECK_LAYOUT_PROVIDER = streamdeck_layout_provider
+    _STREAMDECK_VISUAL_PROVIDER = streamdeck_visual_provider
+    _STREAMDECK_IMAGE_SIZE_PROVIDER = streamdeck_image_size_provider
 
 
 def _canonical_host(value: str) -> str:
@@ -862,6 +877,38 @@ def get_connection_status():
             detail="Connection status is unavailable",
         )
     return _CONNECTION_STATUS_PROVIDER()
+
+
+@router.get(
+    "/api/v1/config/deck/keys/{key}/image",
+    dependencies=[Depends(_require_lan_request)],
+)
+def get_status_key_image(key: int):
+    """Serve the identical 80px artwork sent to a live Stream Deck key."""
+    if key < 0 or key > 31:
+        raise HTTPException(status_code=404, detail="Unknown deck key")
+    if _STREAMDECK_VISUAL_PROVIDER is None:
+        raise HTTPException(status_code=503, detail="Live artwork is unavailable")
+    visuals = _STREAMDECK_VISUAL_PROVIDER()
+    visual = visuals.get(key, visuals.get(str(key)))
+    if not isinstance(visual, dict):
+        raise HTTPException(status_code=404, detail="No live artwork for this key")
+    try:
+        size = (
+            _STREAMDECK_IMAGE_SIZE_PROVIDER()
+            if _STREAMDECK_IMAGE_SIZE_PROVIDER is not None
+            else None
+        ) or (80, 80)
+        image = StreamDeckManager.status_image(**visual, size=size)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Key artwork unavailable") from exc
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.put(

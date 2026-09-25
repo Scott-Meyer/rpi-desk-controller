@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import Mock
 
 import yaml
 from fastapi import HTTPException, Request
+from PIL import Image
 
 from desk_controller.config import load_config
 from desk_controller.pi_controller.api.config_ui import (
@@ -21,6 +23,7 @@ from desk_controller.pi_controller.api.config_ui import (
     configure_config_ui,
     get_configuration,
     get_connection_status,
+    get_status_key_image,
     get_system_version,
     restart_controller,
     restart_system_service,
@@ -94,6 +97,45 @@ audio_devices: {}
         self.assertEqual(config["streamdeck"]["columns"], 3)
         self.assertTrue(config["streamdeck"]["device_detected"])
         self.assertIn(14, [button["key"] for button in config["streamdeck"]["buttons"]])
+
+    def test_web_editor_serves_actual_80px_streamdeck_artwork(self):
+        visual = {
+            "control": "HOST",
+            "observed": "PC 2",
+            "next_action": "→ PC 1",
+            "phase": "pending",
+            "target": "… PC 1",
+        }
+        health_probe = Mock(
+            side_effect=AssertionError("PNG rendering must not probe HA")
+        )
+        configure_config_ui(
+            self.config_path,
+            self.restart,
+            connection_status_provider=health_probe,
+            streamdeck_visual_provider=lambda: {0: visual},
+        )
+        response = get_status_key_image(0)
+        health_probe.assert_not_called()
+        image = Image.open(BytesIO(response.body))
+        self.assertEqual(response.media_type, "image/png")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(image.size, (80, 80))
+        self.assertIn((255, 196, 0), image.getdata())
+        configure_config_ui(
+            self.config_path,
+            self.restart,
+            connection_status_provider=health_probe,
+            streamdeck_visual_provider=lambda: {0: visual},
+            streamdeck_image_size_provider=lambda: (72, 72),
+        )
+        self.assertEqual(
+            Image.open(BytesIO(get_status_key_image(0).body)).size, (72, 72)
+        )
+        health_probe.assert_not_called()
+        with self.assertRaises(HTTPException) as missing:
+            get_status_key_image(1)
+        self.assertEqual(missing.exception.status_code, 404)
 
     def test_sparse_yaml_buttons_remain_enabled_in_public_editor_config(self):
         stored = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))

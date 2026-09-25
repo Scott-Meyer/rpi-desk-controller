@@ -58,6 +58,7 @@ class DeckVisualTests(unittest.TestCase):
         )
         self.assertEqual(keypad_status("BT2", "off").next_action, "PRESS")
         self.assertEqual(keypad_status("BT3", "unavailable").observed, "LED ?")
+        self.assertEqual(keypad_status("BT3", "unavailable").phase, "unknown")
 
 
 if __name__ == "__main__":

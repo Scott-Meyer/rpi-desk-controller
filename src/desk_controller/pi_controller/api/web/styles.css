@@ -441,18 +441,10 @@ input[type="color"] { padding: 4px; }
 .deck-key.error { border: 2px solid #ff5555; }
 .deck-key.ack { border: 2px solid #6ee29e; }
 .deck-key.unknown, .deck-key.blocked { color: #a7b3c5; }
-.deck-key .deck-identity {
-  position: absolute;
-  top: 5px;
-  right: 7px;
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: .05em;
-  color: var(--key-accent);
-}
-.deck-key .deck-icon { font-size: clamp(15px, 2.1vw, 21px); line-height: 1; }
-.deck-key .deck-identity ~ strong { font-size: clamp(10px, 1.3vw, 13px); }
-.deck-key .deck-identity ~ small { font-size: 9px; color: var(--text); }
+.deck-key.visual-key { padding: 0; border: 0; background: #080c14; }
+.deck-key.visual-key::after { display: none; }
+.deck-key.visual-key.selected { box-shadow: 0 0 0 3px rgba(101, 217, 255, .35); }
+.deck-live-art { display: block; width: 100%; height: 100%; object-fit: fill; }
 
 .deck-key.selected {
   border-color: var(--cyan);
@@ -553,7 +545,6 @@ input[type="color"] { padding: 4px; }
   .deck-grid { gap: 6px; padding: 12px; }
   .deck-key { padding-inline: 3px; }
   .deck-key small { display: none; }
-  .deck-key .deck-identity ~ small { display: block; }
   .actions { flex-wrap: wrap; }
   .actions p { flex-basis: 100%; }
   .actions button { flex: 1; }

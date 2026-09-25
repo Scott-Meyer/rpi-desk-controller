@@ -267,6 +267,8 @@ class DeskControllerApp:
             restart_callback=self._request_restart,
             connection_status_provider=self._connection_status,
             streamdeck_layout_provider=self.streamdeck.layout,
+            streamdeck_visual_provider=self._status_visuals,
+            streamdeck_image_size_provider=self.streamdeck.key_image_size,
         )
 
     def _connection_status(self) -> Dict[str, Any]:

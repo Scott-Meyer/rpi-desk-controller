@@ -31,6 +31,7 @@ const buttonFields = {
 };
 
 let buttons = new Map();
+let savedButtons = new Map();
 let selectedKey = 0;
 let liveToggleStates = {};
 let liveTogglePending = {};
@@ -425,41 +426,33 @@ function renderDeck() {
     element.classList.toggle("selected", key === selectedKey);
     element.classList.toggle("empty", !button.enabled);
     element.style.setProperty("--key-accent", rgbToHex(button.accent_color));
-    const visual = button.enabled ? liveDeckVisuals[key] : null;
+    const saved = savedButtons.get(key);
+    const ordered = (value) => JSON.stringify(Object.entries(value || {}).sort(([a], [b]) => a.localeCompare(b)));
+    const unchanged = saved && ordered(button) === ordered(saved);
+    const visual = button.enabled && unchanged ? liveDeckVisuals[key] : null;
     if (visual) {
-      const observedState = visual.observed || "?";
-      const intent = visual.phase === "pending"
-        ? (visual.target || visual.next_action || "…")
-        : visual.phase === "ack" ? "✓ SENT"
-        : visual.phase === "unknown" ? "? CHECK"
-        : visual.phase === "blocked" ? "? WAIT"
-        : visual.phase === "error" ? `↻ ${visual.next_action || "CHECK"}`
-        : visual.next_action || "";
-      const icon = visual.control === "HOST" ? (observedState === "?" ? "?" : "▣")
-        : visual.control === "AC" ? (observedState === "SLEEP" ? "☾" : observedState === "COLD" ? "❄" : "◌")
-        : visual.control === "SHADES" ? (observedState === "OPEN" ? "☀" : observedState === "CLOSED" ? "▤" : "◌")
-        : observedState === "LED ON" ? "●" : observedState === "LED OFF" ? "○" : "◌";
-      const position = document.createElement("span");
-      position.className = "deck-position";
-      position.textContent = key + 1;
-      const heading = document.createElement("span");
-      heading.className = "deck-identity";
-      heading.textContent = visual.control;
-      const artwork = document.createElement("span");
-      artwork.className = "deck-icon";
-      artwork.textContent = icon;
-      const title = document.createElement("strong");
-      title.textContent = observedState;
-      const detail = document.createElement("small");
-      detail.textContent = intent;
-      element.replaceChildren(position, heading, artwork, title, detail);
+      element.classList.add("visual-key");
+      const url = `/api/v1/config/deck/keys/${key}/image?v=${encodeURIComponent(JSON.stringify(visual))}`;
+      const current = element.querySelector(".deck-live-art");
+      if (!current || current.getAttribute("src") !== url) {
+        const art = document.createElement("img");
+        art.className = "deck-live-art";
+        art.alt = "";
+        art.width = 80;
+        art.height = 80;
+        art.src = url;
+        element.replaceChildren(art);
+      }
       for (const phase of ["pending", "error", "unknown", "ack", "blocked"]) {
         element.classList.toggle(phase, visual.phase === phase);
       }
-      element.classList.toggle("active", observedState === "LED ON" || visual.phase === "ack");
-      element.setAttribute("aria-label", `${visual.control}: ${observedState}. ${intent}`);
+      const state = visual.observed || "?";
+      const intent = visual.phase === "pending" ? visual.target : visual.next_action;
+      element.setAttribute("aria-label", `Key ${key + 1}, ${visual.control}: ${state}. Next press: ${intent || "check"}. ${visual.phase}`);
       return;
     }
+    element.classList.remove("visual-key");
+    const unsavedStatusKey = Boolean(liveDeckVisuals[key] && !unchanged);
     for (const phase of ["pending", "error", "unknown", "ack", "blocked"]) {
       element.classList.remove(phase);
     }
@@ -481,6 +474,7 @@ function renderDeck() {
       : "Empty";
     if (pending) label = `${pending === "active" ? (button.active_label || button.label) : button.label}…`;
     else if (failed) label = "Not confirmed";
+    if (unsavedStatusKey) label = "UNSAVED";
     element.classList.toggle("active", toggleState === "active"
       || (button.action_type === "kvm_select" && !liveKvmFault && button.target === liveKvmHost));
     element.classList.toggle("pending", Boolean(pending));
@@ -491,7 +485,7 @@ function renderDeck() {
     const title = document.createElement("strong");
     title.textContent = label;
     const detail = document.createElement("small");
-    detail.textContent = button.enabled
+    detail.textContent = unsavedStatusKey ? "Save & restart" : button.enabled
       ? (button.group || button.action_type.replaceAll("_", " "))
       : "Available to selected computer";
     element.replaceChildren(position, title, detail);
@@ -741,6 +735,7 @@ function populate(config) {
       enabled: button.enabled === undefined ? true : Boolean(button.enabled),
     });
   });
+  savedButtons = new Map([...buttons].map(([key, button]) => [key, JSON.parse(JSON.stringify(button))]));
   config.usb_hub.ports.forEach((port) => {
     const row = document.querySelector(`.port-row[data-port="${port.index}"]`);
     if (row) row.querySelector('[data-field="name"]').value = port.name;

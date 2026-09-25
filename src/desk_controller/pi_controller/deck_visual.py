@@ -130,6 +130,8 @@ def keypad_status(
         if failed
         else "ack"
         if acknowledged
+        else "unknown"
+        if observed == "LED ?"
         else "ready"
     )
     return StatusKey(
