@@ -1140,8 +1140,8 @@ class KVMTransactionTests(unittest.TestCase):
         }
         controller.ha.get_state.side_effect = slow_state
         controller.ha.call_service.return_value = True
-        controller._publish_streamdeck_state.side_effect = (
-            lambda: finished.set() if controller._ha_toggle_states.get(1) else None
+        controller._publish_streamdeck_state.side_effect = lambda: (
+            finished.set() if controller._ha_toggle_states.get(1) else None
         )
         try:
             controller._handle_key_press(1)

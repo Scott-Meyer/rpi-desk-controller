@@ -39,8 +39,8 @@ class HAToggleTests(TestCase):
         )
 
         ha.call_service.reset_mock()
-        ha.get_state.side_effect = (
-            lambda entity: {} if entity.endswith("2") else {"state": "open"}
+        ha.get_state.side_effect = lambda entity: (
+            {} if entity.endswith("2") else {"state": "open"}
         )
         self.assertEqual(press_toggle(button, ha), (False, "unavailable"))
         ha.call_service.assert_not_called()

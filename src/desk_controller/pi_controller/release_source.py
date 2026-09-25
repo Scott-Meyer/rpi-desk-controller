@@ -284,14 +284,18 @@ def _tag_source_tree(commit: str) -> dict[str, tuple[str, str]]:
     return selected
 
 
-def _verify_source_tree(destination: Path, files: set[str], commit: str) -> None:
+def _verify_source_tree(
+    destination: Path, file_modes: dict[str, bool], commit: str
+) -> None:
     expected = _tag_source_tree(commit)
-    if files != expected.keys():
+    if file_modes.keys() != expected.keys():
         raise ReleaseIntegrityError("Pi source file set differs from tagged commit")
     for name, (blob_sha, mode) in expected.items():
         path = destination / name
         stat = path.stat()
-        if bool(stat.st_mode & 0o111) != (mode == "100755"):
+        # Compare archive modes, not the extracted filesystem's st_mode:
+        # Windows runners do not preserve POSIX executable bits in stat().
+        if file_modes[name] != (mode == "100755"):
             raise ReleaseIntegrityError(f"Pi source mode differs from tag: {name}")
         # Git's object IDs are SHA-1 in this repository; use its exact blob format.
         digest = hashlib.sha1(f"blob {stat.st_size}\0".encode())  # nosec B324
@@ -397,9 +401,9 @@ class _LimitedReader:
         return chunk
 
 
-def _extract(archive: Path, destination: Path) -> set[str]:
+def _extract(archive: Path, destination: Path) -> dict[str, bool]:
     seen = set()
-    files = set()
+    files = {}
     total = 0
     try:
         with (
@@ -434,7 +438,7 @@ def _extract(archive: Path, destination: Path) -> set[str]:
                     with tar.extractfile(member) as entry, path.open("xb") as target:
                         shutil.copyfileobj(entry, target, length=64 * 1024)
                     path.chmod(0o755 if member.mode & 0o111 else 0o644)
-                    files.add("/".join(parts))
+                    files["/".join(parts)] = bool(member.mode & 0o111)
         if not _REQUIRED.issubset(files):
             raise ReleaseIntegrityError("release archive is missing required Pi source")
         return files

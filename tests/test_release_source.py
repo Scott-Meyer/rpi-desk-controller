@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -185,9 +186,10 @@ class ReleaseSourceTests(unittest.TestCase):
                 (result.destination / "config/config.example.yaml").read_bytes(),
                 b"example: true",
             )
-            self.assertTrue(
-                (result.destination / "scripts/setup_rpi.sh").stat().st_mode & 0o111
-            )
+            if os.name == "posix":
+                self.assertTrue(
+                    (result.destination / "scripts/setup_rpi.sh").stat().st_mode & 0o111
+                )
             self.assertFalse((result.destination / "RELEASING.md").exists())
             self.assertIn(
                 f"{source.API}/git/trees/{TREE}?recursive=1",
