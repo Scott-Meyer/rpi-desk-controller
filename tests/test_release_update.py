@@ -14,6 +14,13 @@ from desk_controller.pi_controller.release_update import PiReleaseUpdate, Update
 @unittest.skipUnless(os.name == "posix", "Pi updater requires POSIX filesystem locks")
 class PiReleaseUpdateTests(unittest.TestCase):
     def setUp(self):
+        # The fixture models a 1.2.0 Pi offered a newer 1.2.1 release,
+        # independent of the version being built by this checkout.
+        self.version_patch = patch(
+            "desk_controller.pi_controller.release_update.__version__", "1.2.0"
+        )
+        self.version_patch.start()
+        self.addCleanup(self.version_patch.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)

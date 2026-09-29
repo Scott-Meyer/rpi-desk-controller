@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented here.
 
-## Unreleased
+## 1.2.1 - 2026-09-29
 
 - The Pi reconnects a Stream Deck after it is unplugged and reattached, restoring
   brightness, key artwork, and press handling without a service restart.
