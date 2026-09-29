@@ -1,3 +1,4 @@
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -17,6 +18,12 @@ class FakeDeck:
     def set_key_image(self, _key, image):
         self.image = image
 
+    def connected(self):
+        return True
+
+    def is_open(self):
+        return True
+
     def __enter__(self):
         return self
 
@@ -30,7 +37,397 @@ class FakePILHelper:
         return image
 
 
+class PluggedDeck(FakeDeck):
+    """A newly enumerated device handle; USB presence belongs to its bus."""
+
+    def __init__(self, bus):
+        super().__init__()
+        self.bus = bus
+        self.opened = False
+        self.callback = None
+        self.brightness = None
+        self.reset_count = 0
+        self.images = []
+        self.connected_checks = 0
+
+    def connected(self):
+        self.connected_checks += 1
+        return self.bus.plugged
+
+    def is_open(self):
+        return self.opened
+
+    def open(self):
+        self.bus.open_attempts += 1
+        if self.bus.failed_opens:
+            self.bus.failed_opens -= 1
+            raise OSError("USB busy")
+        self.opened = True
+
+    def reset(self):
+        self.reset_count += 1
+
+    def close(self):
+        self.opened = False
+
+    def set_brightness(self, brightness):
+        self.brightness = brightness
+
+    def set_key_callback(self, callback):
+        self.callback = callback
+
+    def key_layout(self):
+        return (2, 3)
+
+    def key_count(self):
+        return 6
+
+    def deck_type(self):
+        return "test deck"
+
+    def id(self):
+        return "USB test port"
+
+    def set_key_image(self, key, image):
+        if not self.bus.plugged:
+            raise OSError("USB unplugged during render")
+        self.images.append((key, image))
+
+
+class FakeUSBBus:
+    def __init__(self):
+        self.plugged = False
+        self.failed_opens = 0
+        self.failed_probes = 0
+        self.open_attempts = 0
+        self.handles = []
+
+    def enumerate(self):
+        if self.failed_probes:
+            self.failed_probes -= 1
+            raise streamdeck_mgr.ProbeError("HID backend probe failed")
+        if not self.plugged:
+            return []
+        handle = PluggedDeck(self)
+        self.handles.append(handle)
+        return [handle]
+
+
 class StreamDeckManagerTests(unittest.TestCase):
+    def test_hot_unplug_replug_repaints_and_rejects_late_key_callbacks(self):
+        bus = FakeUSBBus()
+        presses = []
+        manager = StreamDeckManager(key_callback=presses.append, brightness=37)
+        with (
+            patch.object(streamdeck_mgr, "STREAMDECK_LIB_AVAILABLE", True),
+            patch.object(streamdeck_mgr, "DeviceManager", lambda: bus, create=True),
+            patch.object(streamdeck_mgr, "PILHelper", FakePILHelper, create=True),
+        ):
+            self.assertFalse(manager.initialize())
+            self.assertFalse(manager.refresh_connection())
+            self.assertIsNone(manager.layout())
+            bus.plugged = True
+            self.assertTrue(manager.refresh_connection())
+            first = bus.handles[-1]
+            self.assertEqual(first.brightness, 37)
+            self.assertEqual(first.reset_count, 1)
+            checks = first.connected_checks
+            self.assertEqual(manager.layout(), (2, 3))
+            self.assertEqual(manager.key_image_size(), (72, 72))
+            self.assertEqual(first.connected_checks, checks)
+            self.assertFalse(manager.refresh_connection())
+            self.assertEqual(len(bus.handles), 1)
+            manager.render_status_key(0, "HOST", "PC 1", "→ PC 2")
+            self.assertEqual(len(first.images), 1)
+            self.assertEqual(first.connected_checks, checks + 1)  # poll, not render
+            first.callback(first, 1, True)
+            self.assertEqual([press.key for press in presses], [1])
+            late_callback = first.callback
+
+            bus.plugged = False
+            late_callback(first, 2, True)
+            self.assertEqual([press.key for press in presses], [1])
+            # The poll probes USB; layout reads avoid an expensive HID bus scan.
+            self.assertTrue(manager.refresh_connection())
+            self.assertIsNone(manager.layout())
+            self.assertIsNone(manager.key_image_size())
+            self.assertFalse(first.opened)
+            self.assertFalse(manager.refresh_connection())
+            late_callback(first, 2, True)
+            manager.render_status_key(1, "HOST", "PC 1", "→ PC 2")
+            self.assertEqual([press.key for press in presses], [1])
+            self.assertEqual(len(first.images), 1)
+
+            bus.plugged = True
+            self.assertTrue(manager.refresh_connection())
+            second = bus.handles[-1]
+            self.assertIsNot(first, second)
+            self.assertEqual(second.brightness, 37)
+            self.assertEqual(second.reset_count, 1)
+            self.assertEqual(manager.layout(), (2, 3))
+            late_callback(first, 3, True)
+            second.callback(second, 4, True)
+            self.assertEqual([press.key for press in presses], [1, 4])
+            self.assertEqual((presses[-1].row, presses[-1].column), (1, 1))
+            manager.render_scene_key(2, "Music", "none")
+            self.assertEqual(len(second.images), 1)
+            self.assertFalse(manager.refresh_connection())
+            manager.close()
+
+    def test_probe_failure_on_initialize_is_retried_on_next_poll(self):
+        bus = FakeUSBBus()
+        bus.plugged = True
+        bus.failed_probes = 1
+        manager = StreamDeckManager()
+        with (
+            patch.object(streamdeck_mgr, "STREAMDECK_LIB_AVAILABLE", True),
+            patch.object(streamdeck_mgr, "DeviceManager", lambda: bus, create=True),
+        ):
+            self.assertFalse(manager.initialize())
+            self.assertIsNone(manager.layout())
+            self.assertEqual(bus.open_attempts, 0)
+            self.assertTrue(manager.refresh_connection())
+            self.assertEqual(bus.open_attempts, 1)
+            self.assertEqual(manager.layout(), (2, 3))
+            manager.close()
+
+    def test_late_old_deck_write_failure_cannot_detach_replacement(self):
+        bus = FakeUSBBus()
+        bus.plugged = True
+        manager = StreamDeckManager()
+        writing = threading.Event()
+        finish_write = threading.Event()
+        errors = []
+        with (
+            patch.object(streamdeck_mgr, "STREAMDECK_LIB_AVAILABLE", True),
+            patch.object(streamdeck_mgr, "DeviceManager", lambda: bus, create=True),
+            patch.object(streamdeck_mgr, "PILHelper", FakePILHelper, create=True),
+        ):
+            self.assertTrue(manager.initialize())
+            first = bus.handles[0]
+
+            def late_failure(_key, _image):
+                writing.set()
+                if not finish_write.wait(5):
+                    raise AssertionError("test did not release the old deck write")
+                raise OSError("old deck write failed after replacement")
+
+            first.set_key_image = late_failure
+
+            def render_old():
+                try:
+                    manager.render_status_key(0, "HOST", "PC 1", "→ PC 2")
+                except Exception as exc:
+                    errors.append(exc)
+
+            renderer = threading.Thread(target=render_old, daemon=True)
+            renderer.start()
+            try:
+                self.assertTrue(writing.wait(5), "old render did not begin")
+                bus.plugged = False
+                self.assertTrue(manager.refresh_connection())
+                self.assertFalse(first.opened)
+                bus.plugged = True
+                self.assertTrue(manager.refresh_connection())
+                replacement = bus.handles[-1]
+                self.assertIsNot(first, replacement)
+            finally:
+                finish_write.set()
+                renderer.join(5)
+            self.assertFalse(renderer.is_alive(), "old render did not finish")
+            self.assertEqual(errors, [])
+            self.assertIs(manager.deck, replacement)
+            self.assertTrue(replacement.opened)
+            self.assertEqual(manager.layout(), (2, 3))
+            self.assertFalse(manager.refresh_connection())
+            manager.render_status_key(1, "HOST", "PC 2", "→ PC 1")
+            self.assertEqual(len(replacement.images), 1)
+            manager.close()
+
+    def test_close_while_probing_does_not_publish_a_late_handle(self):
+        bus = FakeUSBBus()
+        bus.plugged = True
+        probing = threading.Event()
+        resume_probe = threading.Event()
+        results = []
+
+        def enumerate_after_close():
+            probing.set()
+            if not resume_probe.wait(5):
+                raise AssertionError("test did not resume the USB probe")
+            return bus.enumerate()
+
+        manager = StreamDeckManager()
+        with (
+            patch.object(streamdeck_mgr, "STREAMDECK_LIB_AVAILABLE", True),
+            patch.object(
+                streamdeck_mgr,
+                "DeviceManager",
+                lambda: Mock(enumerate=enumerate_after_close),
+                create=True,
+            ),
+        ):
+            poller = threading.Thread(
+                target=lambda: results.append(manager.refresh_connection()), daemon=True
+            )
+            poller.start()
+            try:
+                self.assertTrue(probing.wait(5), "USB probe did not begin")
+                manager.close()
+            finally:
+                resume_probe.set()
+                poller.join(5)
+            self.assertFalse(poller.is_alive(), "USB probe did not finish")
+            self.assertEqual(results, [False])
+            self.assertIsNone(manager.deck)
+            self.assertFalse(bus.handles[0].opened)
+            self.assertTrue(manager.refresh_connection())
+            self.assertIs(manager.deck, bus.handles[-1])
+            manager.close()
+
+    def test_accepted_press_and_failing_render_do_not_deadlock(self):
+        bus = FakeUSBBus()
+        bus.plugged = True
+        render_lock = threading.Lock()
+        rendering = threading.Event()
+        press_accepted = threading.Event()
+        rendered = threading.Event()
+        press_finished = threading.Event()
+        manager = StreamDeckManager()
+
+        def on_press(_key):
+            press_accepted.set()
+            with render_lock:
+                press_finished.set()
+
+        manager.key_callback = on_press
+        with (
+            patch.object(streamdeck_mgr, "STREAMDECK_LIB_AVAILABLE", True),
+            patch.object(streamdeck_mgr, "DeviceManager", lambda: bus, create=True),
+            patch.object(streamdeck_mgr, "PILHelper", FakePILHelper, create=True),
+        ):
+            self.assertTrue(manager.initialize())
+            deck = manager.deck
+
+            def draw_and_unplug():
+                with render_lock:
+                    rendering.set()
+                    if not press_accepted.wait(5):
+                        return
+                    bus.plugged = False
+                    manager.render_status_key(0, "HOST", "PC 1", "→ PC 2")
+                    rendered.set()
+
+            renderer = threading.Thread(target=draw_and_unplug, daemon=True)
+            reader = threading.Thread(
+                target=lambda: deck.callback(deck, 0, True), daemon=True
+            )
+            renderer.start()
+            try:
+                self.assertTrue(rendering.wait(5))
+                reader.start()
+                self.assertTrue(press_accepted.wait(5))
+                self.assertTrue(
+                    rendered.wait(5), "render must not wait for key dispatch"
+                )
+                self.assertTrue(press_finished.wait(5), "accepted press must finish")
+            finally:
+                renderer.join(5)
+                if reader.ident is not None:
+                    reader.join(5)
+            self.assertFalse(renderer.is_alive())
+            self.assertFalse(reader.is_alive())
+            self.assertIsNone(manager.deck)
+            manager.close()
+
+    def test_key_callback_can_close_without_manager_lock_reentrancy(self):
+        bus = FakeUSBBus()
+        bus.plugged = True
+        manager = StreamDeckManager()
+        called = threading.Event()
+
+        def on_press(_key):
+            manager.close()
+            called.set()
+
+        manager.key_callback = on_press
+        with (
+            patch.object(streamdeck_mgr, "STREAMDECK_LIB_AVAILABLE", True),
+            patch.object(streamdeck_mgr, "DeviceManager", lambda: bus, create=True),
+        ):
+            self.assertTrue(manager.initialize())
+            deck = manager.deck
+            reader = threading.Thread(
+                target=lambda: deck.callback(deck, 0, True), daemon=True
+            )
+            reader.start()
+            self.assertTrue(called.wait(5), "key callback could not close the deck")
+            reader.join(5)
+            self.assertFalse(reader.is_alive())
+            self.assertIsNone(manager.deck)
+
+    def test_failed_open_is_quiet_and_retried_on_next_poll(self):
+        bus = FakeUSBBus()
+        bus.plugged = True
+        bus.failed_opens = 1
+        manager = StreamDeckManager()
+        with (
+            patch.object(streamdeck_mgr, "STREAMDECK_LIB_AVAILABLE", True),
+            patch.object(streamdeck_mgr, "DeviceManager", lambda: bus, create=True),
+        ):
+            self.assertFalse(manager.initialize())
+            self.assertIsNone(manager.layout())
+            self.assertEqual(bus.open_attempts, 1)
+            self.assertFalse(bus.handles[0].opened)
+            self.assertIsNone(bus.handles[0].callback)
+            self.assertTrue(manager.refresh_connection())
+            self.assertEqual(bus.open_attempts, 2)
+            self.assertEqual(manager.layout(), (2, 3))
+            self.assertFalse(manager.refresh_connection())
+            bus.plugged = False
+            self.assertTrue(manager.refresh_connection())
+            bus.plugged = True
+            bus.failed_opens = 1
+            self.assertFalse(manager.refresh_connection())
+            self.assertIsNone(manager.layout())
+            self.assertTrue(manager.refresh_connection())
+            self.assertEqual(bus.open_attempts, 4)
+            manager.close()
+
+    def test_render_failure_detaches_and_reports_change_on_next_poll(self):
+        for render in ("render_scene_key", "render_status_key"):
+            with self.subTest(render=render):
+                bus = FakeUSBBus()
+                bus.plugged = True
+                manager = StreamDeckManager()
+                with (
+                    patch.object(streamdeck_mgr, "STREAMDECK_LIB_AVAILABLE", True),
+                    patch.object(
+                        streamdeck_mgr, "DeviceManager", lambda: bus, create=True
+                    ),
+                    patch.object(
+                        streamdeck_mgr, "PILHelper", FakePILHelper, create=True
+                    ),
+                ):
+                    self.assertTrue(manager.initialize())
+                    first = bus.handles[0]
+
+                    # Disappear as a USB write begins, after the readiness check.
+                    def unplug(_key, _image):
+                        bus.plugged = False
+                        raise OSError("USB unplugged during render")
+
+                    first.set_key_image = unplug
+                    if render == "render_scene_key":
+                        manager.render_scene_key(0, "Music", "none")
+                    else:
+                        manager.render_status_key(0, "HOST", "PC 1", "→ PC 2")
+                    self.assertIsNone(manager.layout())
+                    self.assertFalse(first.opened)
+                    self.assertTrue(manager.refresh_connection())
+                    self.assertFalse(manager.refresh_connection())
+                    manager.close()
+
     def test_layout_uses_connected_hardware_instead_of_fifteen_key_assumption(self):
         manager = StreamDeckManager()
         self.assertIsNone(manager.layout())

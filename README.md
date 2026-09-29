@@ -73,11 +73,14 @@ The Pi publishes its physical controls and USB hub under
 - `streamdeck/action` publishes `key_0` through the final physical key. The
   number of keys and the button editor follow the connected Stream Deck (for
   example, a six-key Module appears as 2 × 3). If it is disconnected, the
-  editor says so and previews the older 5 × 3 layout.
+  editor says so and previews the older 5 × 3 layout. The Pi checks for a
+  reattached deck and restores its brightness, artwork, and key presses without
+  restarting the service.
 - `streamdeck/event` is a richer JSON press event containing the physical
   row, column, label, action, and state group.
 - `streamdeck/layout` and `streamdeck/state` are retained so consumers can
-  discover the connected layout and its active groups.
+  discover the current layout and active groups. `device_detected` distinguishes
+  an attached deck from the disconnected preview geometry.
 - Every key without a Pi action automatically belongs to the currently
   selected workstation. The Pi caches every workstation profile, leaves
   unassigned or offline keys blank, and illuminates a key while its

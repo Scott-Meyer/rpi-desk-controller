@@ -4,6 +4,8 @@ Elgato Stream Deck manager using python-elgato-streamdeck & PIL vector graphics 
 
 import logging
 import math
+import threading
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -12,13 +14,33 @@ from PIL import Image, ImageDraw, ImageFont
 logger = logging.getLogger(__name__)
 
 try:
-    from StreamDeck.DeviceManager import DeviceManager
+    from StreamDeck.DeviceManager import DeviceManager, ProbeError
     from StreamDeck.ImageHelpers import PILHelper
+    from StreamDeck.Transport.Transport import TransportError
 
     STREAMDECK_LIB_AVAILABLE = True
 except ImportError:
+    ProbeError = OSError
+    TransportError = OSError
     STREAMDECK_LIB_AVAILABLE = False
     logger.warning("StreamDeck SDK not installed. Running StreamDeck in mock mode.")
+
+
+@dataclass(frozen=True)
+class StreamDeckKeyPress:
+    """Accepted key and physical geometry, independent of later USB changes."""
+
+    key: int
+    rows: int
+    columns: int
+
+    @property
+    def row(self) -> int:
+        return self.key // self.columns
+
+    @property
+    def column(self) -> int:
+        return self.key % self.columns
 
 
 class StreamDeckManager:
@@ -30,49 +52,175 @@ class StreamDeckManager:
         self.deck = None
         self.key_callback = key_callback
         self.brightness = brightness
+        # Never hold the state lock across SDK calls or application callbacks.
+        self._state_lock = threading.Lock()
+        self._probe_lock = threading.Lock()
+        self._generation = 0
+        self._connection_changed = False
 
     def initialize(self) -> bool:
+        """Attempt the first connection; a missing deck is retried by refresh_connection."""
         if not STREAMDECK_LIB_AVAILABLE:
             logger.info("[Mock] Stream Deck initialized")
             return True
+        self.refresh_connection()
+        with self._state_lock:
+            return self.deck is not None
 
-        streamdecks = DeviceManager().enumerate()
-        if not streamdecks:
-            logger.warning("No Stream Deck devices found attached to USB.")
+    @staticmethod
+    def _release(deck) -> None:
+        """Release a detached handle without holding the manager's state lock."""
+        try:
+            deck.set_key_callback(None)
+        except (TransportError, OSError, RuntimeError):
+            logger.warning("Could not clear Stream Deck callback", exc_info=True)
+        try:
+            deck.close()
+        except (TransportError, OSError, RuntimeError):
+            logger.warning(
+                "Could not cleanly close detached Stream Deck", exc_info=True
+            )
+
+    def _detach(self, deck) -> None:
+        """Only the failing handle can detach itself, even after a replacement arrives."""
+        with self._state_lock:
+            if deck is not self.deck:
+                return
+            self.deck = None
+            self._generation += 1
+            self._connection_changed = True
+        self._release(deck)
+        logger.info("Stream Deck disconnected")
+
+    def _active_deck(self, *, verify_connection=False):
+        with self._state_lock:
+            deck = self.deck
+        if deck is None:
+            return None
+        try:
+            # connected() scans the HID bus; only the periodic poll (and key
+            # press guard) should pay that cost, not each key in a redraw.
+            if deck.is_open() and (not verify_connection or deck.connected()):
+                with self._state_lock:
+                    return deck if deck is self.deck else None
+        except (TransportError, OSError, RuntimeError):
+            logger.warning("Stream Deck connection check failed", exc_info=True)
+        self._detach(deck)
+        return None
+
+    def refresh_connection(self) -> bool:
+        """Poll USB; return True when attachment changed since the previous poll.
+
+        This includes a disconnect noticed by a failed write or layout read. A
+        failed open leaves the manager detached and is retried on the next poll.
+        """
+        if not STREAMDECK_LIB_AVAILABLE:
             return False
-
-        self.deck = streamdecks[0]
-        self.deck.open()
-        self.deck.reset()
-        self.deck.set_brightness(self.brightness)
-
-        # Register key callback
-        self.deck.set_key_callback(self._on_key_change)
-        logger.info(
-            f"Connected to Stream Deck: {self.deck.deck_type()} ({self.deck.id()})"
-        )
-        return True
+        # A second poll must not race this poll's probe/open and publish a
+        # second handle. Other readers can still detect a loss while probing.
+        with self._probe_lock:
+            if self._active_deck(verify_connection=True) is None:
+                with self._state_lock:
+                    generation = self._generation
+                deck = None
+                try:
+                    devices = DeviceManager().enumerate()
+                    if devices:
+                        deck = devices[0]
+                        deck.open()
+                        deck.reset()
+                        deck.set_brightness(self.brightness)
+                        deck.set_key_callback(self._on_key_change)
+                        deck_type, deck_id = deck.deck_type(), deck.id()
+                        with self._state_lock:
+                            # close() or another thread's detach can invalidate
+                            # an in-flight probe, even when no deck is attached.
+                            publish = (
+                                self.deck is None and self._generation == generation
+                            )
+                            if publish:
+                                self.deck = deck
+                                self._generation += 1
+                                self._connection_changed = True
+                        if publish:
+                            logger.info(
+                                "Connected to Stream Deck: %s (%s)", deck_type, deck_id
+                            )
+                        else:
+                            self._release(deck)
+                except (ProbeError, TransportError, OSError, RuntimeError):
+                    if deck is not None:
+                        self._release(deck)
+                    logger.warning(
+                        "Stream Deck connection failed; will retry", exc_info=True
+                    )
+            with self._state_lock:
+                changed = self._connection_changed
+                self._connection_changed = False
+            return changed
 
     def layout(self) -> tuple[int, int] | None:
         """Return the attached deck's (rows, columns), or None when undetected."""
-        if self.deck is None:
+        deck = self._active_deck()
+        if deck is None:
             return None
-        rows, columns = self.deck.key_layout()
-        if rows <= 0 or columns <= 0 or rows * columns != self.deck.key_count():
+        try:
+            rows, columns = deck.key_layout()
+            count = deck.key_count()
+        except (TransportError, OSError, RuntimeError):
+            self._detach(deck)
+            return None
+        if rows <= 0 or columns <= 0 or rows * columns != count:
             raise ValueError("Stream Deck reported an inconsistent physical layout")
         return rows, columns
 
     def key_image_size(self) -> tuple[int, int] | None:
         """Native key pixels, for consumers rendering the same artwork."""
-        if self.deck is None:
+        deck = self._active_deck()
+        if deck is None:
             return None
-        width, height = self.deck.key_image_format()["size"]
+        try:
+            width, height = deck.key_image_format()["size"]
+        except (TransportError, OSError, RuntimeError):
+            self._detach(deck)
+            return None
         return int(width), int(height)
 
     def _on_key_change(self, deck, key: int, state: bool):
         """Internal callback fired on key press / release."""
-        if state and self.key_callback:
-            self.key_callback(key)
+        if not state:
+            return
+        with self._state_lock:
+            if deck is not self.deck:
+                return
+        try:
+            ready = deck.is_open() and deck.connected()
+        except (TransportError, OSError, RuntimeError):
+            logger.warning("Stream Deck key press check failed", exc_info=True)
+            ready = False
+        if not ready:
+            self._detach(deck)
+            return
+        try:
+            rows, columns = deck.key_layout()
+        except (TransportError, OSError, RuntimeError):
+            self._detach(deck)
+            return
+        if rows <= 0 or columns <= 0 or not 0 <= key < rows * columns:
+            logger.warning(
+                "Ignoring invalid Stream Deck key %s for %sx%s layout",
+                key,
+                rows,
+                columns,
+            )
+            return
+        with self._state_lock:
+            callback = self.key_callback if deck is self.deck else None
+        # A press accepted while this handle was current can finish even if
+        # physical detachment begins afterward. The immutable press retains
+        # its original geometry; no app work runs under the state lock.
+        if callback:
+            callback(StreamDeckKeyPress(key=key, rows=rows, columns=columns))
 
     def _draw_sun_icon(
         self, draw: ImageDraw.ImageDraw, cx: int, cy: int, r: int, color: tuple
@@ -1036,7 +1184,8 @@ class StreamDeckManager:
         target: str | None = None,
     ) -> None:
         """Send the shared status artwork to the attached Stream Deck."""
-        if not STREAMDECK_LIB_AVAILABLE or not self.deck:
+        deck = self._active_deck() if STREAMDECK_LIB_AVAILABLE else None
+        if deck is None:
             logger.info(
                 "[Mock] Stream Deck Key %s [%s] %s: %s (next %s)",
                 key,
@@ -1046,17 +1195,22 @@ class StreamDeckManager:
                 target if phase == "pending" and target else next_action,
             )
             return
-        image = self.status_image(
-            control,
-            observed,
-            next_action,
-            phase=phase,
-            target=target,
-            size=self.deck.key_image_format()["size"],
-        )
-        native_image = PILHelper.to_native_format(self.deck, image)
-        with self.deck:
-            self.deck.set_key_image(key, native_image)
+        try:
+            size = deck.key_image_format()["size"]
+            image = self.status_image(
+                control,
+                observed,
+                next_action,
+                phase=phase,
+                target=target,
+                size=size,
+            )
+            native_image = PILHelper.to_native_format(deck, image)
+            with deck:
+                deck.set_key_image(key, native_image)
+        except (TransportError, OSError, RuntimeError):
+            self._detach(deck)
+            logger.warning("Stream Deck status render failed", exc_info=True)
 
     def render_scene_key(
         self,
@@ -1072,7 +1226,8 @@ class StreamDeckManager:
         display_style: str = "button",
     ):
         """Renders key image with PIL vector graphics and dynamic glowing states."""
-        if not STREAMDECK_LIB_AVAILABLE or not self.deck:
+        deck = self._active_deck() if STREAMDECK_LIB_AVAILABLE else None
+        if deck is None:
             status = "LIT" if is_active else "DARK"
             if is_available is False:
                 status = "OFFLINE"
@@ -1083,8 +1238,13 @@ class StreamDeckManager:
             )
             return
 
-        key_format = self.deck.key_image_format()
-        width, height = key_format["size"]
+        try:
+            key_format = deck.key_image_format()
+            width, height = key_format["size"]
+        except (TransportError, OSError, RuntimeError):
+            self._detach(deck)
+            logger.warning("Stream Deck image format unavailable", exc_info=True)
+            return
         bg_color = (10, 10, 14)
 
         img = Image.new("RGB", (width, height), color=bg_color)
@@ -1196,9 +1356,13 @@ class StreamDeckManager:
         )
         img.paste(content.crop(safe_box), safe_box[:2])
 
-        native_image = PILHelper.to_native_format(self.deck, img)
-        with self.deck:
-            self.deck.set_key_image(key, native_image)
+        try:
+            native_image = PILHelper.to_native_format(deck, img)
+            with deck:
+                deck.set_key_image(key, native_image)
+        except (TransportError, OSError, RuntimeError):
+            self._detach(deck)
+            logger.warning("Stream Deck scene render failed", exc_info=True)
 
     @staticmethod
     def _draw_dotted_border(
@@ -1238,7 +1402,18 @@ class StreamDeckManager:
             )
 
     def close(self):
-        if self.deck:
-            with self.deck:
-                self.deck.reset()
-                self.deck.close()
+        with self._state_lock:
+            deck = self.deck
+            self.deck = None
+            # Invalidate a concurrent probe before clearing a pending poll event.
+            self._generation += 1
+            self._connection_changed = False
+        if deck is not None:
+            try:
+                with deck:
+                    deck.reset()
+            except (TransportError, OSError, RuntimeError):
+                logger.warning(
+                    "Stream Deck reset failed during shutdown", exc_info=True
+                )
+            self._release(deck)

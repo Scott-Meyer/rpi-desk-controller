@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented here.
 
+## Unreleased
+
+- The Pi reconnects a Stream Deck after it is unplugged and reattached, restoring
+  brightness, key artwork, and press handling without a service restart.
+  Callbacks from an already detached device are ignored.
+- Added a manual, administrator-authorized Pi update button for verified GitHub
+  releases, with installation outside the running service and startup rollback.
+
 ## 1.2.0 - 2026-09-14
 
 - Added Pi-native LG alt-input DDC/CI switching, using the manufacturer's

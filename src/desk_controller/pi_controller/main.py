@@ -59,7 +59,10 @@ from desk_controller.pi_controller.deck_visual import (
     keypad_status,
 )
 from desk_controller.pi_controller.drivers.monitor_ddc import MonitorDDCController
-from desk_controller.pi_controller.drivers.streamdeck_mgr import StreamDeckManager
+from desk_controller.pi_controller.drivers.streamdeck_mgr import (
+    StreamDeckKeyPress,
+    StreamDeckManager,
+)
 from desk_controller.pi_controller.drivers.usb_switch import (
     create_usb_controller,
 )
@@ -1915,6 +1918,8 @@ class DeskControllerApp:
             {
                 "rows": rows,
                 "columns": columns,
+                "device_detected": getattr(self, "streamdeck", None) is not None
+                and self.streamdeck.layout() is not None,
                 "buttons": buttons,
                 "controller_url": controller_url,
             },
@@ -1952,8 +1957,14 @@ class DeskControllerApp:
             retain=True,
         )
 
-    def _publish_button_event(self, key: int, button: Dict[str, Any]):
-        _, columns = self._deck_dimensions()
+    def _publish_button_event(
+        self, key: int, button: Dict[str, Any], press: StreamDeckKeyPress | None = None
+    ):
+        if press is not None:
+            row, column = press.row, press.column
+        else:
+            _, columns = self._deck_dimensions()
+            row, column = key // columns, key % columns
         action_payload = f"key_{key}"
         self.mqtt.publish(
             f"{self.STREAMDECK_TOPIC}/action",
@@ -1966,8 +1977,8 @@ class DeskControllerApp:
                 "event": "press",
                 "key": key,
                 "button_number": key + 1,
-                "row": key // columns,
-                "column": key % columns,
+                "row": row,
+                "column": column,
                 "configured": bool(button),
                 "label": button.get("label", f"Key {key + 1}"),
                 "group": button.get("group", ""),
@@ -2368,13 +2379,15 @@ class DeskControllerApp:
         self._publish_streamdeck_state()
         return True
 
-    def _handle_key_press(self, key: int):
+    def _handle_key_press(self, key: int | StreamDeckKeyPress):
+        press = key if isinstance(key, StreamDeckKeyPress) else None
+        key = press.key if press is not None else key
         logger.info("Stream Deck key pressed: %s", key)
         # HA/Deck presses must not wait for a slow monitor read/write holding
         # the KVM hardware lock. Workstation-bound actions are gated below.
         button = dict(self.buttons.get(key, {}))
         selected_workstation = self._get_active_hostname()
-        self._publish_button_event(key, button)
+        self._publish_button_event(key, button, press)
         if not button or not button.get("enabled", True):
             self._publish_streamdeck_state()
             return
@@ -2794,6 +2807,17 @@ class DeskControllerApp:
         except (Exception, SystemExit):
             logger.exception("HTTP server stopped unexpectedly")
 
+    def _refresh_streamdeck(self) -> bool:
+        """Repaint and reannounce only when the physical deck changes."""
+        if not self.streamdeck.refresh_connection():
+            return False
+        self._update_sd_keys()
+        self._publish_streamdeck_layout()
+        self._publish_streamdeck_state()
+        if self.streamdeck.layout() is not None and self.homeassistant_enabled:
+            self.register_ha_streamdeck_discovery()
+        return True
+
     def _api_ready(self) -> bool:
         """Uvicorn has completed startup and is still serving requests."""
         return bool(
@@ -2815,6 +2839,7 @@ class DeskControllerApp:
             if not local_usb_ready:
                 self.kvm_fault = True
         self.streamdeck.initialize()
+        last_streamdeck_probe = time.monotonic()
         self._update_sd_keys()
         self._clock_display_minute = (
             datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
@@ -2873,6 +2898,12 @@ class DeskControllerApp:
 
         try:
             while not self._stop_event.is_set():
+                if time.monotonic() - last_streamdeck_probe >= 5:
+                    last_streamdeck_probe = time.monotonic()
+                    try:
+                        self._refresh_streamdeck()
+                    except Exception:
+                        logger.exception("Stream Deck USB check failed; will retry")
                 if update_health_after and time.monotonic() >= update_health_after:
                     if self._release_update.status().get("state") == "awaiting_health":
                         if not self._api_ready():
