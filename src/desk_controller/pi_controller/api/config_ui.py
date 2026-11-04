@@ -784,8 +784,14 @@ def _save_update(payload: PiConfigurationUpdate) -> Path:
         }
         if payload.usb_switch is not None:
             config["usb_switch"] = payload.usb_switch.model_dump()
+        # The form edits only the display and its input codes. Settings it
+        # does not show, such as LG ``use_alt_addressing``, must survive a
+        # save; dropping that one silently turns switching into an
+        # acknowledged no-op on LG alternate inputs.
+        existing_monitors = config.get("monitors") or [{}]
         config["monitors"] = [
             {
+                **existing_monitors[0],
                 "display_id": payload.monitor.display_id,
                 "inputs": {
                     "pc1": payload.monitor.pc1_input,
@@ -796,7 +802,8 @@ def _save_update(payload: PiConfigurationUpdate) -> Path:
                         else {}
                     ),
                 },
-            }
+            },
+            *existing_monitors[1:],
         ]
         streamdeck = config.setdefault("streamdeck", {})
         streamdeck["brightness"] = payload.streamdeck.brightness

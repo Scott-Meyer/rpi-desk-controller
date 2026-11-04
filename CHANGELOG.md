@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented here.
 
+## Unreleased
+
+- Saving the Pi configuration page keeps monitor settings the page does not
+  show, such as `use_alt_addressing`. Previously a save dropped it, so LG
+  alt-input monitors acknowledged KVM switches without changing input.
+
 ## 1.2.1 - 2026-09-29
 
 - The Pi reconnects a Stream Deck after it is unplugged and reattached, restoring

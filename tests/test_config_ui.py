@@ -342,6 +342,50 @@ audio_devices: {}
         self.assertNotIn("audio_devices", persisted)
         self.assertEqual(config["usb_hub"]["ports"][3]["name"], "Port 3")
 
+    def test_saving_the_form_keeps_monitor_settings_it_does_not_show(self):
+        # Real regression: an LG UltraGear needs use_alt_addressing. A UI save
+        # dropped it, so every KVM switch afterwards moved USB but not video.
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                '      pc2: "0x11"\n',
+                '      pc2: "0x11"\n    use_alt_addressing: true\n',
+            ),
+            encoding="utf-8",
+        )
+        payload = PiConfigurationUpdate.model_validate(
+            {
+                "server": {"host": "0.0.0.0", "port": 8080},
+                "mqtt": {
+                    "mode": "local",
+                    "broker": "homeassistant.local",
+                    "port": 1883,
+                    "username": "",
+                },
+                "homeassistant": {"enabled": False, "url": ""},
+                "hardware": {"simulate": False},
+                "acroname": {"serial_number": None, "default_channel": 0},
+                "monitor": {
+                    "display_id": 1,
+                    "pc1_input": "0xd0",
+                    "pc2_input": "0x91",
+                },
+                "streamdeck": {"brightness": 70, "buttons": []},
+                "usb_hub": {
+                    "telemetry_interval": 10,
+                    "ports": [
+                        {"index": index, "name": f"Port {index}"} for index in range(8)
+                    ],
+                },
+                "workstations": {"pc1": "desktop", "pc2": "laptop"},
+            }
+        )
+
+        update_configuration(payload)
+
+        monitor = load_config(str(self.config_path))["monitors"][0]
+        self.assertIs(monitor.get("use_alt_addressing"), True)
+        self.assertEqual(monitor["inputs"], {"pc1": "0xd0", "pc2": "0x91"})
+
     def test_disabled_home_assistant_does_not_require_a_url(self):
         payload = PiConfigurationUpdate.model_validate(
             {
