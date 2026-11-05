@@ -9,11 +9,16 @@ not hold (last activated in September).
 
 import copy
 import threading
+import time
 import unittest
 from datetime import datetime
 from unittest.mock import Mock
 
-from desk_controller.pi_controller.ha_scene_state import SceneObserver
+from desk_controller.pi_controller.ha_scene_state import (
+    SceneObserver,
+    effect_from_scene_config,
+    effect_matches,
+)
 from desk_controller.pi_controller.main import DeskControllerApp
 
 OFF = "automation.turn_off_scott"
@@ -206,25 +211,75 @@ class SceneKeyTests(unittest.TestCase):
         self.assertEqual(self.keys(), {})
 
 
+class SceneDefinitionTests(unittest.TestCase):
+    def test_saved_cover_position_must_still_hold(self):
+        effect = effect_from_scene_config(
+            {"entities": {"cover.main": {"state": "open", "current_position": 25}}}
+        )
+        now = {"state": "open", "attributes": {"current_position": 75}}
+
+        self.assertFalse(effect_matches(effect, lambda _e: now))
+
+    def test_colour_saved_without_a_mode_is_not_ignored(self):
+        effect = effect_from_scene_config(
+            {
+                "entities": {
+                    STRIP: {"state": "on", "brightness": 30, "rgb_color": [255, 0, 0]}
+                }
+            }
+        )
+        now = {
+            "state": "on",
+            "attributes": {"brightness": 30, "rgb_color": [0, 0, 255]},
+        }
+
+        self.assertFalse(effect_matches(effect, lambda _e: now))
+
+
 class SceneKeysAfterRestartTests(unittest.TestCase):
-    def test_fresh_controller_lights_the_keys_home_assistant_reports(self):
-        ha = FakeHomeAssistant()
+    def make_app(self, ha):
         app = DeskControllerApp.__new__(DeskControllerApp)
         app.homeassistant_enabled = True
         app.physical_buttons = BUTTONS
-        app.ha = Mock(wraps=ha)
-        app._scene_observer = SceneObserver(ha, clock=lambda: ha.now)
+        app.ha = ha
+        app._scene_observer = SceneObserver(ha, clock=lambda: FakeHomeAssistant.NOW)
         app.active_groups = {}  # nothing pressed since the restart
         app._ha_toggle_states = {}
         app._ha_toggle_pending = {}
         app._ha_toggle_lock = threading.RLock()
         app._update_sd_keys = Mock()
         app._publish_streamdeck_state = Mock()
+        return app
 
-        self.assertTrue(app._refresh_ha_toggles())
+    def test_fresh_controller_lights_the_keys_home_assistant_reports(self):
+        app = self.make_app(FakeHomeAssistant())
+
+        app._refresh_ha_toggles()
+        app._scene_worker.join(timeout=2)
 
         self.assertEqual(app.active_groups, {"lighting": 8, "shades": 10})
         app._update_sd_keys.assert_called()
+
+    def test_slow_home_assistant_never_holds_up_the_controller_loop(self):
+        ha = FakeHomeAssistant()
+        release = threading.Event()
+        answer = ha.get_state
+
+        def slow_get_state(entity_id):
+            release.wait(2)  # Home Assistant timing out
+            return answer(entity_id)
+
+        ha.get_state = slow_get_state
+        app = self.make_app(ha)
+        started = time.monotonic()
+
+        app._refresh_ha_toggles()
+        app._refresh_ha_toggles()  # next loop pass while the first is stuck
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        release.set()
+        app._scene_worker.join(timeout=5)
+        self.assertEqual(app.active_groups, {"lighting": 8, "shades": 10})
 
 
 if __name__ == "__main__":

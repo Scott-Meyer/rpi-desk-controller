@@ -2825,6 +2825,39 @@ class DeskControllerApp:
                 ),
             )
 
+    def _start_scene_refresh(self) -> bool:
+        """Refresh scene keys off the main loop; one refresh at a time."""
+        worker = getattr(self, "_scene_worker", None)
+        if worker is not None and worker.is_alive():
+            return False
+        self._scene_worker = threading.Thread(
+            target=self._refresh_scene_keys, name="ha-scene-keys", daemon=True
+        )
+        self._scene_worker.start()
+        return True
+
+    def _refresh_scene_keys(self) -> bool:
+        """Light the scene keys Home Assistant reports as current."""
+        # Scene keys show what Home Assistant reports right now, wherever the
+        # scene was started, rather than what this deck pressed since start.
+        try:
+            scene_groups = self._scene_observer.refresh(self.physical_buttons)
+        except Exception:
+            logger.exception("Could not read Home Assistant scene states")
+            return False
+        changed = False
+        for group, key in scene_groups.items():
+            if self.active_groups.get(group) != key:
+                if key is None:
+                    self.active_groups.pop(group, None)
+                else:
+                    self.active_groups[group] = key
+                changed = True
+        if changed:
+            self._update_sd_keys()
+            self._publish_streamdeck_state()
+        return changed
+
     def _refresh_ha_toggles(self) -> bool:
         """Refresh observed states without inferring success from service calls."""
         if not self.homeassistant_enabled:
@@ -2842,20 +2875,7 @@ class DeskControllerApp:
                 if self._ha_toggle_states.get(key) != state:
                     self._ha_toggle_states[key] = state
                     changed = True
-        # Scene keys show what Home Assistant reports right now, wherever the
-        # scene was started, rather than what this deck pressed since start.
-        try:
-            scene_groups = self._scene_observer.refresh(self.physical_buttons)
-        except Exception:
-            logger.exception("Could not read Home Assistant scene states")
-            scene_groups = {}
-        for group, key in scene_groups.items():
-            if self.active_groups.get(group) != key:
-                if key is None:
-                    self.active_groups.pop(group, None)
-                else:
-                    self.active_groups[group] = key
-                changed = True
+        self._start_scene_refresh()
         with self._ha_toggle_lock:
             for group, item in list(self._ha_toggle_pending.items()):
                 if item["target"] == "requesting":

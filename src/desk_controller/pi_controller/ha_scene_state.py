@@ -62,19 +62,23 @@ def effect_from_scene_config(config: Mapping[str, Any]) -> Effect:
         if not isinstance(stored, Mapping) or "state" not in stored:
             continue
         expected: Dict[str, Any] = {"state": str(stored["state"])}
+        if stored.get("current_position") is not None:
+            expected["current_position"] = stored["current_position"]
         if expected["state"] == "on":
-            for attribute in ("brightness", "current_position", "effect"):
+            for attribute in ("brightness", "effect"):
                 if stored.get(attribute) is not None:
                     expected[attribute] = stored[attribute]
             mode = stored.get("color_mode")
             if mode in (None, "color_temp") and stored.get("color_temp_kelvin"):
                 expected["color_temp_kelvin"] = stored["color_temp_kelvin"]
-            elif mode in ("hs", "xy", "rgb", "rgbw", "rgbww") and stored.get(
-                "xy_color"
-            ):
+            elif stored.get("xy_color") and mode in (
+                None, "hs", "xy", "rgb", "rgbw", "rgbww",
+            ):  # fmt: skip
                 expected["xy_color"] = stored["xy_color"]
-            elif mode not in (None, "brightness", "onoff", "color_temp"):
-                expected["unsupported"] = mode  # never claim it holds
+            elif mode not in (None, "brightness", "onoff", "color_temp") or any(
+                stored.get(c) for c in ("hs_color", "rgb_color", "rgbw_color")
+            ):
+                expected["unsupported"] = mode or "colour"  # never claim it holds
         effect[entity_id] = expected
     return effect
 
