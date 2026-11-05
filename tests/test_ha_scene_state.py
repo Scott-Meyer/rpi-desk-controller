@@ -13,6 +13,12 @@ from desk_controller.pi_controller.ha_scene_state import active_scene_keys
 from desk_controller.pi_controller.main import DeskControllerApp
 
 OFF = "automation.turn_off_scott"
+LIGHTS = [
+    "light.scott_s_room_bedroom_loftbed",
+    "light.scott_bedroom_loft_lights",
+    "light.scott_s_room_bedroom_silent_lights",
+    "light.hue_play_gradient_lightstrip_2",
+]
 BUTTONS = {
     0: {"action_type": "kvm_toggle", "group": "kvm"},
     5: {
@@ -57,16 +63,21 @@ BUTTONS = {
 }
 
 
+def light_scene(activated):
+    return {"state": activated, "attributes": {"entity_id": list(LIGHTS)}}
+
+
 def desk_states():
     return {
-        "scene.scotts_room_lights_on": {"state": "2026-11-05T00:06:06.137207+00:00"},
-        "scene.scotts_room_lights_dim": {"state": "2026-11-04T04:30:11.304010+00:00"},
-        "scene.scotts_room_lights_meeting_bright": {
-            "state": "2026-11-05T01:47:46.347253+00:00"
-        },
-        "scene.scotts_room_lights_medium": {
-            "state": "2026-11-05T02:25:29.271560+00:00"
-        },
+        **{light: {"state": "on"} for light in LIGHTS},
+        "scene.scotts_room_lights_on": light_scene("2026-11-05T00:06:06.137207+00:00"),
+        "scene.scotts_room_lights_dim": light_scene("2026-11-04T04:30:11.304010+00:00"),
+        "scene.scotts_room_lights_meeting_bright": light_scene(
+            "2026-11-05T01:47:46.347253+00:00"
+        ),
+        "scene.scotts_room_lights_medium": light_scene(
+            "2026-11-05T02:25:29.271560+00:00"
+        ),
         OFF: {
             "state": "on",
             "attributes": {"last_triggered": "2026-11-04T06:02:14.631806+00:00"},
@@ -109,6 +120,42 @@ class ActiveSceneKeyTests(unittest.TestCase):
 
         self.assertIsNone(
             active_scene_keys(BUTTONS, lambda e: states.get(e, {}))["shades"]
+        )
+
+    def test_lights_switched_off_elsewhere_mean_no_scene_is_active(self):
+        # Latest scene is MEDIUM, but the lights were turned off at the wall,
+        # so the next press must turn a scene on, not run the off action.
+        states = desk_states()
+        for light in LIGHTS:
+            states[light] = {"state": "off"}
+
+        self.assertIsNone(
+            active_scene_keys(BUTTONS, lambda e: states.get(e, {}))["lighting"]
+        )
+
+    def test_one_light_still_on_keeps_the_scene_active(self):
+        states = desk_states()
+        for light in LIGHTS[1:]:
+            states[light] = {"state": "off"}
+
+        self.assertEqual(
+            active_scene_keys(BUTTONS, lambda e: states.get(e, {}))["lighting"], 8
+        )
+
+    def test_missing_newest_scene_does_not_promote_an_older_one(self):
+        states = desk_states()
+        del states["scene.scotts_room_lights_medium"]
+
+        self.assertNotIn(
+            "lighting", active_scene_keys(BUTTONS, lambda e: states.get(e, {}))
+        )
+
+    def test_missing_off_action_does_not_relight_the_group(self):
+        states = desk_states()
+        del states[OFF]
+
+        self.assertNotIn(
+            "lighting", active_scene_keys(BUTTONS, lambda e: states.get(e, {}))
         )
 
     def test_unreachable_home_assistant_leaves_groups_untouched(self):

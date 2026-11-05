@@ -5,12 +5,19 @@ timestamp), and when every automation or script last ran. So within a group of
 ``ha_scene`` keys, the active key is the scene activated most recently from
 anywhere, unless the group's ``off_target`` ran after it. This survives
 restarts and sees activations made outside the Stream Deck.
+
+Current state still overrules history where Home Assistant exposes it: if
+every switchable member of that scene (lights, switches, fans) is off now,
+for example from a wall switch, no scene in the group is active, so the next
+press turns the scene on instead of running the off action.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Callable, Dict, Mapping, Optional
+
+_SWITCHABLE = ("light.", "switch.", "fan.")
 
 
 def _activated_at(state: Mapping[str, Any]) -> Optional[datetime]:
@@ -58,25 +65,44 @@ def active_scene_keys(
 
     result: Dict[str, Optional[int]] = {}
     for group, members in groups.items():
-        latest: Optional[tuple[datetime, int]] = None
-        readable = False
-        offs: set[str] = set()
-        for key, button in members:
-            state = state_of(str(button["target"]).strip())
-            readable = readable or bool(state)
-            moment = _activated_at(state)
-            if moment is not None and (latest is None or moment > latest[0]):
-                latest = (moment, key)
-            off = str(button.get("off_target", "")).strip()
-            if off:
-                offs.add(off)
-        if not readable:
+        targets = [str(button["target"]).strip() for _key, button in members]
+        offs = {
+            str(button.get("off_target", "")).strip()
+            for _key, button in members
+            if str(button.get("off_target", "")).strip()
+        }
+        # Decide only from a complete picture: a missing newest scene or off
+        # action would otherwise promote an older one.
+        if not all(state_of(entity) for entity in (*targets, *offs)):
             continue
-        if latest is not None:
-            for off in offs:
-                off_moment = _activated_at(state_of(off))
-                if off_moment is not None and off_moment > latest[0]:
-                    latest = None
-                    break
-        result[group] = latest[1] if latest is not None else None
+        latest: Optional[tuple[datetime, int, str]] = None
+        for (key, _button), target in zip(members, targets):
+            moment = _activated_at(state_of(target))
+            if moment is not None and (latest is None or moment > latest[0]):
+                latest = (moment, key, target)
+        if latest is None:
+            result[group] = None
+            continue
+        if any(
+            (off_moment := _activated_at(state_of(off))) is not None
+            and off_moment > latest[0]
+            for off in offs
+        ):
+            result[group] = None
+            continue
+        switchable = [
+            entity
+            for entity in (state_of(latest[2]).get("attributes") or {}).get(
+                "entity_id", []
+            )
+            if str(entity).startswith(_SWITCHABLE)
+        ]
+        if switchable:
+            member_states = [state_of(entity).get("state") for entity in switchable]
+            if any(not state for state in member_states):
+                continue  # a member could not be read; keep what is shown
+            if all(state == "off" for state in member_states):
+                result[group] = None
+                continue
+        result[group] = latest[1]
     return result
