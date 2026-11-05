@@ -130,6 +130,30 @@ class FakeHomeAssistant:
     def get_scene_config(self, scene_id):
         return copy.deepcopy(self.definitions.get(scene_id, {}))
 
+    accept = True  # Home Assistant accepts service calls
+    apply = True  # and the lights actually reach the scene
+
+    def activate_scene(self, scene):
+        if not self.accept:
+            return False
+        self.states[scene]["state"] = "2026-11-05T02:41:00+00:00"
+        if self.apply:
+            sid = self.states[scene]["attributes"]["id"]
+            for entity, saved in self.definitions[sid]["entities"].items():
+                kelvin = saved.get("color_temp_kelvin")
+                self.states[entity] = light(saved["brightness"], kelvin)
+        return True
+
+    def trigger_automation(self, automation):
+        if not self.accept:
+            return False
+        self.states[automation]["attributes"]["last_triggered"] = (
+            "2026-11-05T02:41:00+00:00"
+        )
+        for entity in LIGHTS:
+            self.states[entity] = {"state": "off", "attributes": {}}
+        return True
+
 
 class SceneKeyTests(unittest.TestCase):
     def setUp(self):
@@ -249,6 +273,9 @@ class SceneKeysAfterRestartTests(unittest.TestCase):
         app._ha_toggle_lock = threading.RLock()
         app._update_sd_keys = Mock()
         app._publish_streamdeck_state = Mock()
+        app._scene_pending = {}
+        app._scene_failures = {}
+        app._scene_lock = threading.RLock()
         return app
 
     def test_fresh_controller_lights_the_keys_home_assistant_reports(self):
@@ -280,6 +307,147 @@ class SceneKeysAfterRestartTests(unittest.TestCase):
         release.set()
         app._scene_worker.join(timeout=5)
         self.assertEqual(app.active_groups, {"lighting": 8, "shades": 10})
+
+
+def eventually_true(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+class ScenePressTests(unittest.TestCase):
+    """Pressing a scene key shows pending until Home Assistant reports it."""
+
+    def setUp(self):
+        self.ha = FakeHomeAssistant()
+        self.app = SceneKeysAfterRestartTests.make_app(self, self.ha)
+        self.app._refresh_scene_keys()  # the deck after start: MEDIUM is lit
+
+    def press(self, key):
+        self.app._start_scene_press(key, BUTTONS[key])
+
+    def status_becomes(self, key, status, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.app._scene_key_status(key) == status:
+                return True
+            time.sleep(0.01)
+        return self.app._scene_key_status(key) == status
+
+    def test_press_is_pending_until_the_lights_reach_the_scene(self):
+        self.assertEqual(self.app._scene_key_status(8), "active")
+        release = threading.Event()
+        activate = self.ha.activate_scene
+        self.ha.activate_scene = lambda scene: release.wait(2) and activate(scene)
+
+        self.press(6)  # DIM
+
+        self.assertEqual(self.app._scene_key_status(6), "pending")
+        self.assertEqual(self.app._scene_statuses(), {6: "pending", 8: "active"})
+        release.set()
+        self.assertTrue(self.status_becomes(6, "active"))
+        self.assertEqual(self.app._scene_statuses(), {6: "active"})
+
+    def test_home_assistant_rejecting_the_scene_shows_a_failure(self):
+        self.ha.accept = False
+
+        self.press(6)
+
+        self.assertTrue(self.status_becomes(6, "failed"))
+        self.assertEqual(self.app._scene_key_status(8), "active")
+
+    def test_lights_that_never_get_there_end_as_a_failure(self):
+        self.ha.apply = False  # HA accepts, but a light errors part-way
+        self.app.SCENE_CONFIRM_SECONDS = 0.05
+
+        self.press(6)
+        self.assertTrue(self.status_becomes(6, "pending"))
+        time.sleep(0.1)
+        self.app._refresh_scene_keys()
+
+        self.assertEqual(self.app._scene_key_status(6), "failed")
+
+    def test_off_is_not_confirmed_by_lights_that_merely_changed(self):
+        # The off automation ran but left one light on: lights are mixed, no
+        # scene matches, and that is not "off".
+        trigger = self.ha.trigger_automation
+
+        def partly_off(automation):
+            trigger(automation)
+            self.ha.states[SILENT] = light(40)
+            return True
+
+        self.ha.trigger_automation = partly_off
+        self.app.SCENE_CONFIRM_SECONDS = 0.05
+
+        self.press(8)
+        time.sleep(0.1)
+        self.app._refresh_scene_keys()
+
+        self.assertEqual(self.app._scene_key_status(8), "failed")
+
+    def test_failed_off_stays_failed_while_the_scene_is_still_lit(self):
+        self.ha.accept = False
+
+        self.press(8)
+        self.assertTrue(self.status_becomes(8, "failed"))
+        self.app._refresh_scene_keys()  # MEDIUM still matches the lights
+
+        self.assertEqual(self.app._scene_key_status(8), "failed")
+
+    def test_a_refresh_during_the_call_cannot_hide_a_later_rejection(self):
+        release = threading.Event()
+
+        def rejected_after_a_while(_scene):
+            release.wait(2)
+            return False
+
+        self.ha.activate_scene = rejected_after_a_while
+        self.press(6)
+        # While the call is out, the lights happen to read as DIM already.
+        for entity, saved in self.ha.definitions["dim"]["entities"].items():
+            self.ha.states[entity] = light(
+                saved["brightness"], saved.get("color_temp_kelvin")
+            )
+        self.app._refresh_scene_keys()
+        self.assertEqual(self.app._scene_key_status(6), "pending")
+
+        release.set()
+
+        self.assertTrue(self.status_becomes(6, "failed"))
+
+    def test_an_older_press_finishing_late_cannot_fail_a_newer_one(self):
+        releases = [threading.Event(), threading.Event()]
+        calls = []
+        activate = self.ha.activate_scene
+
+        def ordered(scene):
+            index = len(calls)
+            calls.append(scene)
+            releases[index].wait(2)
+            return False if index == 0 else activate(scene)
+
+        self.ha.activate_scene = ordered
+        self.press(6)
+        self.press(6)  # pressed again while the first call is still out
+        self.assertTrue(eventually_true(lambda: len(calls) == 2))
+
+        releases[0].set()  # the first press's call fails, late
+        time.sleep(0.1)
+        self.assertEqual(self.app._scene_key_status(6), "pending")
+        releases[1].set()  # the newer press succeeds
+
+        self.assertTrue(self.status_becomes(6, "active"))
+
+    def test_pressing_the_lit_scene_turns_the_lights_off(self):
+        self.press(8)
+
+        self.assertIn(self.app._scene_key_status(8), {"turning_off", None})
+        self.assertTrue(self.status_becomes(8, None))
+        self.assertTrue(all(self.ha.states[e]["state"] == "off" for e in LIGHTS))
 
 
 if __name__ == "__main__":

@@ -1043,39 +1043,6 @@ class KVMTransactionTests(unittest.TestCase):
         self.assertEqual(event_calls[0].args[1]["key"], 14)
         self.assertFalse(event_calls[0].args[1]["configured"])
 
-    def test_successful_scene_buttons_are_mutually_exclusive_by_group(self):
-        controller = self.make_controller()
-        controller.buttons = {
-            5: {
-                "enabled": True,
-                "label": "ON",
-                "group": "lighting",
-                "action_type": "ha_scene",
-                "target": "scene.on",
-                "off_target": "automation.off",
-            },
-            6: {
-                "enabled": True,
-                "label": "DIM",
-                "group": "lighting",
-                "action_type": "ha_scene",
-                "target": "scene.dim",
-                "off_target": "automation.off",
-            },
-        }
-        controller.ha.activate_scene.return_value = True
-        controller.ha.trigger_automation.return_value = True
-
-        controller._handle_key_press(5)
-        self.assertEqual(controller.active_groups["lighting"], 5)
-
-        controller._handle_key_press(6)
-        self.assertEqual(controller.active_groups["lighting"], 6)
-
-        controller._handle_key_press(6)
-        self.assertNotIn("lighting", controller.active_groups)
-        controller.ha.trigger_automation.assert_called_once_with("automation.off")
-
     def test_generic_home_assistant_service_button_calls_local_config(self):
         controller = self.make_controller()
         controller.buttons = {

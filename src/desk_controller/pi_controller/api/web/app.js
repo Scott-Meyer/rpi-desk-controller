@@ -36,6 +36,7 @@ let selectedKey = 0;
 let liveToggleStates = {};
 let liveTogglePending = {};
 let liveToggleFailures = new Set();
+let liveSceneStatus = {};
 let liveDeckVisuals = {};
 let liveKvmHost = null;
 let liveKvmFault = false;
@@ -213,6 +214,7 @@ function renderConnectionStatus(status) {
   liveToggleStates = status.ha_toggles || {};
   liveTogglePending = status.ha_pending || {};
   liveToggleFailures = new Set(status.ha_failures || []);
+  liveSceneStatus = status.scene_status || {};
   liveDeckVisuals = status.deck_visuals || {};
   liveKvmHost = status.active_host || null;
   liveKvmFault = Boolean(status.kvm_fault);
@@ -462,8 +464,10 @@ function renderDeck() {
     }[button.action_type];
     const observed = ["ha_toggle", "ha_state_action"].includes(button.action_type);
     const toggleState = observed ? liveToggleStates[key] : null;
-    const pending = observed ? liveTogglePending[key] : null;
-    const failed = observed && liveToggleFailures.has(key);
+    const sceneStatus = button.action_type === "ha_scene" ? liveSceneStatus[key] : null;
+    const pending = observed ? liveTogglePending[key]
+      : ["pending", "turning_off"].includes(sceneStatus) ? sceneStatus : null;
+    const failed = (observed && liveToggleFailures.has(key)) || sceneStatus === "failed";
     let label = button.enabled
       ? (toggleState === "active" ? (button.active_label || button.label)
         : toggleState === "unavailable" && button.action_type === "ha_toggle" ? "UNAVAILABLE"
@@ -472,10 +476,11 @@ function renderDeck() {
         : toggleState === "mixed" && button.action_type === "ha_toggle" ? "MIXED"
         : (dynamicLabel || button.label || "Empty"))
       : "Empty";
-    if (pending) label = `${pending === "active" ? (button.active_label || button.label) : button.label}…`;
+    if (pending === "turning_off") label = "Turning off…";
+    else if (pending) label = `${pending === "active" ? (button.active_label || button.label) : button.label}…`;
     else if (failed) label = "Not confirmed";
     if (unsavedStatusKey) label = "UNSAVED";
-    element.classList.toggle("active", toggleState === "active"
+    element.classList.toggle("active", toggleState === "active" || sceneStatus === "active"
       || (button.action_type === "kvm_select" && !liveKvmFault && button.target === liveKvmHost));
     element.classList.toggle("pending", Boolean(pending));
     element.classList.toggle("error", Boolean(failed && !pending));

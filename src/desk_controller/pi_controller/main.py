@@ -235,6 +235,12 @@ class DeskControllerApp:
         self._ha_toggle_failures: set[int] = set()
         self._ha_toggle_lock = threading.RLock()
         self._last_ha_toggle_poll = 0.0
+        # Scene presses wait for Home Assistant to report the scene (or "off")
+        # before the key settles; group -> {"key", "want", "deadline"}.
+        self._scene_pending: Dict[str, Dict[str, Any]] = {}
+        # key -> what that failed press wanted (its own key, or None for off)
+        self._scene_failures: Dict[int, Optional[int]] = {}
+        self._scene_lock = threading.RLock()
         self._last_monitor_check = 0.0
         self._monitor_observer: Optional[threading.Thread] = None
         self._monitor_generation = 0
@@ -351,6 +357,7 @@ class DeskControllerApp:
             "ha_toggles": dict(getattr(self, "_ha_toggle_states", {})),
             "ha_pending": self._ha_pending_keys(),
             "ha_failures": list(getattr(self, "_ha_toggle_failures", set())),
+            "scene_status": self._scene_statuses(),
             "keypad_leds": dict(getattr(self, "_keypad_led_states", {})),
             "keypad_pending": list(getattr(self, "_keypad_pending", set())),
             "keypad_failures": list(getattr(self, "_keypad_failures", set())),
@@ -2065,6 +2072,7 @@ class DeskControllerApp:
                 "ha_toggles": dict(getattr(self, "_ha_toggle_states", {})),
                 "ha_pending": self._ha_pending_keys(),
                 "ha_failures": list(getattr(self, "_ha_toggle_failures", set())),
+                "scene_status": self._scene_statuses(),
                 "keypad_leds": dict(getattr(self, "_keypad_led_states", {})),
                 "keypad_pending": list(getattr(self, "_keypad_pending", set())),
                 "keypad_failures": list(getattr(self, "_keypad_failures", set())),
@@ -2569,21 +2577,15 @@ class DeskControllerApp:
                 logger.warning("Failed queuing audio switch command")
 
         elif action_type == "ha_scene":
-            off_target = str(button.get("off_target", "")).strip()
             if not getattr(self, "homeassistant_enabled", True):
                 logger.warning(
                     "Ignoring Home Assistant action on key %s because the "
                     "integration is disabled",
                     key,
                 )
-            elif group and self.active_groups.get(group) == key and off_target:
-                action_succeeded = self.ha.trigger_automation(off_target)
-                if action_succeeded:
-                    self.active_groups.pop(group, None)
             elif target:
-                action_succeeded = self.ha.activate_scene(target)
-                if action_succeeded and group:
-                    self.active_groups[group] = key
+                self._start_scene_press(key, button)
+                return
 
         elif action_type in {"ha_toggle", "ha_state_action"}:
             if not getattr(self, "homeassistant_enabled", True):
@@ -2769,6 +2771,16 @@ class DeskControllerApp:
                 )
                 if kvm_fault:
                     color = (255, 60, 60)
+            elif action_type == "ha_scene":
+                scene_status = self._scene_key_status(key)
+                is_pending = scene_status in {"pending", "turning_off"}
+                active = scene_status == "active"
+                if scene_status == "turning_off":
+                    label = "TURNING\nOFF..."
+                elif is_pending:
+                    label = f"{label}..."
+                elif scene_status == "failed":
+                    label = "NOT\nCONFIRMED"
             elif action_type == "workstation_slot":
                 is_available = bool(
                     button.get("_agent_online") and button.get("_slot_configured")
@@ -2811,9 +2823,15 @@ class DeskControllerApp:
                     else button.get("icon", "none")
                 ),
                 has_error=bool(
-                    action_type in {"ha_toggle", "ha_state_action"}
-                    and not is_pending
-                    and key in getattr(self, "_ha_toggle_failures", set())
+                    (
+                        action_type in {"ha_toggle", "ha_state_action"}
+                        and not is_pending
+                        and key in getattr(self, "_ha_toggle_failures", set())
+                    )
+                    or (
+                        action_type == "ha_scene"
+                        and self._scene_key_status(key) == "failed"
+                    )
                 ),
                 is_active=active,
                 accent_color=color,
@@ -2824,6 +2842,170 @@ class DeskControllerApp:
                     action_type if action_type in DYNAMIC_DATETIME_ACTIONS else "button"
                 ),
             )
+
+    SCENE_CONFIRM_SECONDS = 20
+
+    def _start_scene_press(self, key: int, button: Dict[str, Any]) -> None:
+        """Run a scene key: pending until Home Assistant reports the result.
+
+        Pressing the key of the scene that is active runs its ``off_target``
+        instead. The key shows pending until Home Assistant reports that scene
+        (or no scene, for off), and fails visibly if Home Assistant rejects the
+        call or the result does not appear within ``SCENE_CONFIRM_SECONDS``.
+        A newer press in the same group replaces an older pending one.
+        """
+        group = str(button.get("group", "")).strip() or f"key-{key}"
+        off_target = str(button.get("off_target", "")).strip()
+        turning_off = bool(off_target and self.active_groups.get(group) == key)
+        with self._scene_lock:
+            request = uuid4()
+            self._scene_pending[group] = {
+                "id": request,
+                "phase": "requesting",  # until Home Assistant answers the call
+                "key": key,
+                "want": None if turning_off else key,
+                "deadline": time.monotonic() + self.SCENE_CONFIRM_SECONDS,
+                "lights": [],  # for off: the scene's lights that must report off
+            }
+            self._scene_failures.pop(key, None)
+
+        def run():
+            if turning_off:
+                members = (
+                    self.ha.get_state(str(button["target"]).strip()).get("attributes")
+                    or {}
+                ).get("entity_id", [])
+                with self._scene_lock:
+                    item = self._scene_pending.get(group)
+                    if item and item["id"] == request:
+                        item["lights"] = [
+                            e
+                            for e in members
+                            if str(e).startswith(("light.", "switch.", "fan."))
+                        ]
+            try:
+                accepted = (
+                    self.ha.trigger_automation(off_target)
+                    if turning_off
+                    else self.ha.activate_scene(str(button["target"]).strip())
+                )
+            except Exception:
+                logger.exception("Home Assistant scene call on key %s failed", key)
+                accepted = False
+            with self._scene_lock:
+                item = self._scene_pending.get(group)
+                if item is not None and item["id"] == request:
+                    if not accepted or not button.get("group"):
+                        # Ungrouped scenes have no observed state to wait for.
+                        self._scene_pending.pop(group, None)
+                        if not accepted:
+                            self._scene_failures[key] = None if turning_off else key
+                    else:
+                        item["phase"] = "accepted"
+                        # Count the confirmation window from Home Assistant's
+                        # answer, not from the press.
+                        item["deadline"] = time.monotonic() + self.SCENE_CONFIRM_SECONDS
+            if accepted:
+                self._last_ha_toggle_poll = 0.0  # confirm promptly
+                self._start_scene_refresh()
+            self._update_sd_keys()
+            self._publish_streamdeck_state()
+
+        threading.Thread(target=run, name=f"ha-scene-{key}", daemon=True).start()
+        self._update_sd_keys()
+        self._publish_streamdeck_state()
+
+    def _scene_key_status(self, key: int) -> Optional[str]:
+        """``pending``/``turning_off``, ``failed``, ``active``, or ``None``."""
+        button = getattr(self, "physical_buttons", {}).get(key, {})
+        group = str(button.get("group", "")).strip() or f"key-{key}"
+        with getattr(self, "_scene_lock", threading.RLock()):
+            pending = getattr(self, "_scene_pending", {}).get(group)
+            if pending and pending["key"] == key:
+                return "pending" if pending["want"] == key else "turning_off"
+            if key in getattr(self, "_scene_failures", set()):
+                return "failed"
+        return "active" if self.active_groups.get(group) == key else None
+
+    def _scene_statuses(self) -> Dict[int, str]:
+        """Every scene key's status, for the web preview and MQTT state."""
+        return {
+            key: status
+            for key, button in getattr(self, "physical_buttons", {}).items()
+            if button.get("action_type") == "ha_scene"
+            and (status := self._scene_key_status(key)) is not None
+        }
+
+    def _confirm_scene_presses(
+        self,
+        observed: set[str],
+        lights_off: Optional[Dict[str, bool]] = None,
+    ) -> bool:
+        """Settle pending scene presses against a fresh Home Assistant reading.
+
+        Only presses Home Assistant has accepted are settled, and only from
+        groups ``observed`` in this refresh. A scene press is confirmed when its
+        key becomes the group's active scene. An off press is confirmed when
+        the scene's lights all report off (``lights_off[group]``); for a scene
+        with no lights Home Assistant can observe, when no scene of the group
+        is active any more.
+        """
+        lights_off = lights_off or {}
+        changed = False
+        with self._scene_lock:
+            for group, item in list(self._scene_pending.items()):
+                if item["phase"] != "accepted":
+                    continue
+                done = False
+                if group in observed:
+                    if item["want"] is None:
+                        done = (
+                            lights_off.get(group, False)
+                            if item["lights"]
+                            else self.active_groups.get(group) != item["key"]
+                        )
+                    else:
+                        done = self.active_groups.get(group) == item["want"]
+                if done:
+                    self._scene_pending.pop(group)
+                    changed = True
+                elif time.monotonic() >= item["deadline"]:
+                    logger.warning(
+                        "Home Assistant never reported the result of scene key %s",
+                        item["key"],
+                    )
+                    self._scene_pending.pop(group)
+                    self._scene_failures[item["key"]] = item["want"]
+                    changed = True
+            for key, wanted in list(self._scene_failures.items()):
+                group = (
+                    str(self.physical_buttons.get(key, {}).get("group", "")).strip()
+                    or f"key-{key}"
+                )
+                # A failed scene press that Home Assistant later shows anyway
+                # recovered; a failed off press clears only on the next press.
+                if (
+                    wanted == key
+                    and group in observed
+                    and group not in self._scene_pending
+                    and self.active_groups.get(group) == key
+                ):
+                    self._scene_failures.pop(key)
+                    changed = True
+        return changed
+
+    def _scene_lights_off(self) -> Dict[str, bool]:
+        """For pending off presses: whether their scene's lights all read off."""
+        with self._scene_lock:
+            wanted = {
+                group: list(item["lights"])
+                for group, item in self._scene_pending.items()
+                if item["want"] is None and item["lights"]
+            }
+        return {
+            group: all(self.ha.get_state(e).get("state") == "off" for e in lights)
+            for group, lights in wanted.items()
+        }
 
     def _start_scene_refresh(self) -> bool:
         """Refresh scene keys off the main loop; one refresh at a time."""
@@ -2853,6 +3035,10 @@ class DeskControllerApp:
                 else:
                     self.active_groups[group] = key
                 changed = True
+        changed = (
+            self._confirm_scene_presses(set(scene_groups), self._scene_lights_off())
+            or changed
+        )
         if changed:
             self._update_sd_keys()
             self._publish_streamdeck_state()
@@ -3092,7 +3278,9 @@ class DeskControllerApp:
                 if time.monotonic() - self._last_monitor_check >= monitor_poll_interval:
                     if self._start_monitor_observation():
                         self._last_monitor_check = time.monotonic()
-                poll_interval = 2 if self._ha_toggle_pending else 10
+                poll_interval = (
+                    2 if self._ha_toggle_pending or self._scene_pending else 10
+                )
                 if time.monotonic() - self._last_ha_toggle_poll >= poll_interval:
                     self._last_ha_toggle_poll = time.monotonic()
                     self._refresh_ha_toggles()
