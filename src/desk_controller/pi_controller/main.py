@@ -70,7 +70,7 @@ from desk_controller.pi_controller.ha_keypad import (
     press_keypad_button,
     read_keypad_led,
 )
-from desk_controller.pi_controller.ha_scene_state import active_scene_keys
+from desk_controller.pi_controller.ha_scene_state import SceneObserver
 from desk_controller.pi_controller.ha_toggle import (
     press_state_action,
     press_toggle,
@@ -158,6 +158,9 @@ class DeskControllerApp:
         self.ha = HomeAssistantClient(
             base_url=ha_conf.get("url", "http://homeassistant.local:8123"),
             token=ha_conf.get("token", ""),
+        )
+        self._scene_observer = SceneObserver(
+            self.ha, Path(self.config_path).parent / "scene_effects.json"
         )
 
         sd_brightness = self.config.get("streamdeck", {}).get("brightness", 85)
@@ -2841,10 +2844,10 @@ class DeskControllerApp:
                 if self._ha_toggle_states.get(key) != state:
                     self._ha_toggle_states[key] = state
                     changed = True
-        # Scene keys show what Home Assistant last activated, from anywhere,
-        # rather than only what this deck pressed since it started.
+        # Scene keys show what Home Assistant reports right now, wherever the
+        # scene was started, rather than what this deck pressed since start.
         try:
-            scene_groups = active_scene_keys(self.physical_buttons, self.ha.get_state)
+            scene_groups = self._scene_observer.refresh(self.physical_buttons)
         except Exception:
             logger.exception("Could not read Home Assistant scene states")
             scene_groups = {}
