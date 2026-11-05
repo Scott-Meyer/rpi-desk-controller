@@ -70,6 +70,7 @@ from desk_controller.pi_controller.ha_keypad import (
     press_keypad_button,
     read_keypad_led,
 )
+from desk_controller.pi_controller.ha_scene_state import active_scene_keys
 from desk_controller.pi_controller.ha_toggle import (
     press_state_action,
     press_toggle,
@@ -2840,6 +2841,20 @@ class DeskControllerApp:
                 if self._ha_toggle_states.get(key) != state:
                     self._ha_toggle_states[key] = state
                     changed = True
+        # Scene keys show what Home Assistant last activated, from anywhere,
+        # rather than only what this deck pressed since it started.
+        try:
+            scene_groups = active_scene_keys(self.physical_buttons, self.ha.get_state)
+        except Exception:
+            logger.exception("Could not read Home Assistant scene states")
+            scene_groups = {}
+        for group, key in scene_groups.items():
+            if self.active_groups.get(group) != key:
+                if key is None:
+                    self.active_groups.pop(group, None)
+                else:
+                    self.active_groups[group] = key
+                changed = True
         with self._ha_toggle_lock:
             for group, item in list(self._ha_toggle_pending.items()):
                 if item["target"] == "requesting":

@@ -4,6 +4,9 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+- Scene keys (lights, shades) show the scene Home Assistant last activated
+  from anywhere, unless the group's off action ran after it, so the active
+  key survives restarts and reflects scenes started outside the Stream Deck.
 - With a Pi-owned Acroname hub, the selected computer is always the host the
   hub reports. The Stream Deck, MQTT state, audio, and workstation keys
   follow it, including when the monitor step fails or USB is moved by
