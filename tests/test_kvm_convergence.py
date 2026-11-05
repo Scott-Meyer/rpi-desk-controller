@@ -308,6 +308,13 @@ class SelectedComputerFollowsUSBTests(unittest.TestCase):
         self.addCleanup(app._kvm_convergence.stop)
         return app
 
+    def settled_on_pc1(self, app):
+        """Startup finished: USB is on PC1 and the monitor was sent there."""
+        return eventually(
+            lambda: app._kvm_convergence.state().monitor_host == 0
+            and not app._kvm_convergence.state().pending
+        )
+
     def published_host(self, app):
         states = [
             c.args[1]
@@ -348,12 +355,16 @@ class SelectedComputerFollowsUSBTests(unittest.TestCase):
                 )
             ),
         )
-        self.assertTrue(eventually(lambda: not app._kvm_convergence.state().pending))
+        self.assertTrue(self.settled_on_pc1(app))
 
         app._start_kvm_switch(1)
 
-        self.assertTrue(eventually(lambda: app.acroname.active_channel == 1))
-        self.assertTrue(eventually(lambda: not app._kvm_convergence.state().pending))
+        self.assertTrue(
+            eventually(
+                lambda: app.acroname.active_channel == 1
+                and app._kvm_convergence.state().monitor_host == 1
+            )
+        )
         owner, _transaction, *rest = app._execute_remote_kvm_step.call_args.args
         self.assertEqual(owner, "windows-id")  # PC1 was showing
         self.assertEqual(rest, ["monitor_set", 1])
@@ -376,7 +387,7 @@ class SelectedComputerFollowsUSBTests(unittest.TestCase):
             kvm={"monitor_controller": "active_workstation", "usb_controller": "pi"},
             remote_step=remote_step,
         )
-        self.assertTrue(eventually(lambda: not app._kvm_convergence.state().pending))
+        self.assertTrue(self.settled_on_pc1(app))
         # Someone switches the monitor to PC2 by hand, so only PC2's agent
         # can reach it now.
         reachable = {"mac-id"}
