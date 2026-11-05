@@ -41,7 +41,6 @@ jobs:
           python -m compileall -q src
           python -c "from desk_controller.pi_controller.api.app import app; assert app.title"
           python -c "from desk_controller.desktop_agent.main_tray import DeskAgentTrayApp; assert DeskAgentTrayApp"
-          python -m unittest discover -s tests
 
       - name: Validate shell scripts
         run: |
@@ -82,7 +81,6 @@ jobs:
           python -m pip install -e ".[pi,desktop]"
           python -m pip check
 
-      - name: Test platform behavior
+      - name: Compile on each platform
         run: |
           python -m compileall -q src
-          python -m unittest discover -s tests

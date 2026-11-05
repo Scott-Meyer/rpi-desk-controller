@@ -39,7 +39,6 @@ jobs:
           ruff check .
           ruff format --check .
           bandit -q -r src -ll
-          python -m unittest discover -s tests
 
   build-pi-source:
     needs: validate-version

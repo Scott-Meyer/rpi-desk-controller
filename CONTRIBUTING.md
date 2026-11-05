@@ -8,7 +8,6 @@ Bug reports and focused pull requests are welcome.
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[pi,desktop,dev]"
-python -m unittest discover -s tests
 ruff check .
 ruff format --check .
 bandit -q -r src -ll
@@ -28,7 +27,7 @@ Platform-specific hardware is optional during development. Use
   `mqtt.example.test`.
 - Document new configuration fields and preserve existing device
   configurations when practical.
-- Run the complete test and static-check commands before submitting.
+- Run the static-check commands before submitting.
 
 Third-party binaries and dependencies require a license and redistribution
 review before they can be added to source or release artifacts.

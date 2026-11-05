@@ -4,10 +4,9 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
-- Scene keys show the pending lines after a press until Home Assistant
-  reports that scene (or, for a press that turns the scene off, until its
-  lights report off). If Home Assistant rejects the call or the result never
-  appears, the key returns to what Home Assistant reports.
+- Scene keys show the same dotted pending border as other keys after a press,
+  until Home Assistant reports that scene (or, for a press that turns the
+  scene off, until its lights report off); their label is unchanged.
 - Scene keys show what Home Assistant reports right now, so the active key
   survives restarts and reflects changes made anywhere. Home Assistant-defined
   scenes (the light scenes) are matched against their stored states:
