@@ -2896,8 +2896,7 @@ class DeskControllerApp:
                         # Ungrouped scenes have no observed state to wait for.
                         self._scene_pending.pop(group, None)
                         if not accepted:
-                            self._scene_failures[key] = None if turning_off else key
-                            self._scene_failed_at[key] = time.monotonic()
+                            logger.warning("Home Assistant rejected scene key %s", key)
                     else:
                         item["phase"] = "accepted"
                         # Count the confirmation window from Home Assistant's
@@ -2977,8 +2976,6 @@ class DeskControllerApp:
                         item["key"],
                     )
                     self._scene_pending.pop(group)
-                    self._scene_failures[item["key"]] = item["want"]
-                    self._scene_failed_at[item["key"]] = time.monotonic()
                     changed = True
             for key, wanted in list(self._scene_failures.items()):
                 group = (

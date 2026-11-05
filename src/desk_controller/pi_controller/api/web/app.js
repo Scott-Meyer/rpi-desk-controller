@@ -467,7 +467,7 @@ function renderDeck() {
     const sceneStatus = button.action_type === "ha_scene" ? liveSceneStatus[key] : null;
     const pending = observed ? liveTogglePending[key]
       : ["pending", "turning_off"].includes(sceneStatus) ? sceneStatus : null;
-    const failed = (observed && liveToggleFailures.has(key)) || sceneStatus === "failed";
+    const failed = observed && liveToggleFailures.has(key);
     let label = button.enabled
       ? (toggleState === "active" ? (button.active_label || button.label)
         : toggleState === "unavailable" && button.action_type === "ha_toggle" ? "UNAVAILABLE"
