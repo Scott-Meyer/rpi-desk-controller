@@ -158,6 +158,24 @@ class ActiveSceneKeyTests(unittest.TestCase):
             "lighting", active_scene_keys(BUTTONS, lambda e: states.get(e, {}))
         )
 
+    def test_unavailable_newest_scene_does_not_promote_an_older_one(self):
+        states = desk_states()
+        states["scene.scotts_room_lights_medium"] = {"state": "unavailable"}
+
+        self.assertNotIn(
+            "lighting", active_scene_keys(BUTTONS, lambda e: states.get(e, {}))
+        )
+
+    def test_unavailable_light_does_not_count_as_on(self):
+        states = desk_states()
+        states[LIGHTS[0]] = {"state": "unavailable"}
+        for light in LIGHTS[1:]:
+            states[light] = {"state": "off"}
+
+        self.assertNotIn(
+            "lighting", active_scene_keys(BUTTONS, lambda e: states.get(e, {}))
+        )
+
     def test_unreachable_home_assistant_leaves_groups_untouched(self):
         self.assertEqual(active_scene_keys(BUTTONS, lambda _e: {}), {})
 

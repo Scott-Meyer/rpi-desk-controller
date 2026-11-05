@@ -35,6 +35,12 @@ def _activated_at(state: Mapping[str, Any]) -> Optional[datetime]:
     return None
 
 
+def _readable(state: Mapping[str, Any]) -> bool:
+    """A real reply about an entity that exists. A scene that was never
+    activated reads ``unknown``, which is a legitimate answer."""
+    return bool(state) and state.get("state") != "unavailable"
+
+
 def active_scene_keys(
     buttons: Mapping[int, Mapping[str, Any]],
     read_state: Callable[[str], Mapping[str, Any]],
@@ -73,7 +79,7 @@ def active_scene_keys(
         }
         # Decide only from a complete picture: a missing newest scene or off
         # action would otherwise promote an older one.
-        if not all(state_of(entity) for entity in (*targets, *offs)):
+        if not all(_readable(state_of(entity)) for entity in (*targets, *offs)):
             continue
         latest: Optional[tuple[datetime, int, str]] = None
         for (key, _button), target in zip(members, targets):
@@ -99,8 +105,8 @@ def active_scene_keys(
         ]
         if switchable:
             member_states = [state_of(entity).get("state") for entity in switchable]
-            if any(not state for state in member_states):
-                continue  # a member could not be read; keep what is shown
+            if any(state not in ("on", "off") for state in member_states):
+                continue  # a member's power is not known; keep what is shown
             if all(state == "off" for state in member_states):
                 result[group] = None
                 continue
