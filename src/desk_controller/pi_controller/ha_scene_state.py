@@ -176,8 +176,10 @@ def active_scene_keys(
             continue
         by_recency = sorted(
             zip(members, targets),
-            key=lambda item: _activated_at(state_of(item[1]))
-            or datetime.min.replace(tzinfo=timezone.utc),
+            key=lambda item: (
+                _activated_at(state_of(item[1]))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ),
             reverse=True,
         )
         matching = [key for (key, _b), target in by_recency if matches.get(target)]

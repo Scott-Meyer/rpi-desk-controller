@@ -170,8 +170,10 @@ class KVMConvergence:
         """
         with self._changed:
             self._changed.wait_for(
-                lambda: self._generation != generation
-                or (self._read_generation == generation and self._usb_host == host),
+                lambda: (
+                    self._generation != generation
+                    or (self._read_generation == generation and self._usb_host == host)
+                ),
                 timeout,
             )
             return (
