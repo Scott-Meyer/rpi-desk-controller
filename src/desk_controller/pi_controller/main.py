@@ -240,6 +240,7 @@ class DeskControllerApp:
         self._scene_pending: Dict[str, Dict[str, Any]] = {}
         # key -> what that failed press wanted (its own key, or None for off)
         self._scene_failures: Dict[int, Optional[int]] = {}
+        self._scene_failed_at: Dict[int, float] = {}
         self._scene_lock = threading.RLock()
         self._last_monitor_check = 0.0
         self._monitor_observer: Optional[threading.Thread] = None
@@ -2896,6 +2897,7 @@ class DeskControllerApp:
                         self._scene_pending.pop(group, None)
                         if not accepted:
                             self._scene_failures[key] = None if turning_off else key
+                            self._scene_failed_at[key] = time.monotonic()
                     else:
                         item["phase"] = "accepted"
                         # Count the confirmation window from Home Assistant's
@@ -2937,6 +2939,7 @@ class DeskControllerApp:
         observed: set[str],
         lights_off: Optional[Dict[str, bool]] = None,
         settleable: Optional[set] = None,
+        read_started: float = float("inf"),
     ) -> bool:
         """Settle pending scene presses against a fresh Home Assistant reading.
 
@@ -2975,6 +2978,7 @@ class DeskControllerApp:
                     )
                     self._scene_pending.pop(group)
                     self._scene_failures[item["key"]] = item["want"]
+                    self._scene_failed_at[item["key"]] = time.monotonic()
                     changed = True
             for key, wanted in list(self._scene_failures.items()):
                 group = (
@@ -2983,8 +2987,10 @@ class DeskControllerApp:
                 )
                 # A failed scene press that Home Assistant later shows anyway
                 # recovered; a failed off press clears only on the next press.
+                failed_at = getattr(self, "_scene_failed_at", {}).get(key, 0.0)
                 if (
                     wanted == key
+                    and failed_at < read_started  # reading began after it failed
                     and group in observed
                     and group not in self._scene_pending
                     and self.active_groups.get(group) == key
@@ -3042,6 +3048,7 @@ class DeskControllerApp:
         """Light the scene keys Home Assistant reports as current."""
         # Scene keys show what Home Assistant reports right now, wherever the
         # scene was started, rather than what this deck pressed since start.
+        read_started = time.monotonic()
         with self._scene_lock:
             # Only requests already accepted when this reading starts can be
             # settled by it; a newer one waits for a reading taken after it.
@@ -3065,7 +3072,7 @@ class DeskControllerApp:
                 changed = True
         changed = (
             self._confirm_scene_presses(
-                set(scene_groups), self._scene_lights_off(), settleable
+                set(scene_groups), self._scene_lights_off(), settleable, read_started
             )
             or changed
         )

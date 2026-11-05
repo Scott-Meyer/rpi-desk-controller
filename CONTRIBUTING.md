@@ -19,7 +19,8 @@ Platform-specific hardware is optional during development. Use
 
 ## Pull requests
 
-- Add tests for behavior changes and failure paths.
+- Only add end-to-end tests of real product behavior, driven through the
+  same boundary a person or device uses. Don't add unit tests.
 - Keep hardware operations fail-closed.
 - Never commit `config/config.yaml`, credentials, private hostnames, device
   serial numbers, or personal Home Assistant entity IDs.
