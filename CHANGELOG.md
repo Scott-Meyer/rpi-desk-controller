@@ -4,6 +4,14 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+- With a Pi-owned Acroname hub, the selected computer is always the host the
+  hub reports. The Stream Deck, MQTT state, audio, and workstation keys
+  follow it, including when the monitor step fails or USB is moved by
+  another tool, and the monitor is then sent to that computer.
+- KVM requests are no longer dropped: the latest request wins and USB, then
+  the monitor, are retried with backoff until they arrive. Pressing the key
+  for the current computer re-sends the monitor input. A failed hub reading
+  is reported as unknown instead of the last commanded host.
 - Saving the Pi configuration page keeps monitor settings the page does not
   show, such as `use_alt_addressing`. Previously a save dropped it, so LG
   alt-input monitors acknowledged KVM switches without changing input.

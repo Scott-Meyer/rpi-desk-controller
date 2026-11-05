@@ -36,7 +36,7 @@ def host_status(
         destination = f"PC {pending_pc + 1}" if pending_pc in (0, 1) else "READING"
         return StatusKey(
             "HOST",
-            observed if not fault else None,
+            observed,
             f"→ {destination}",
             "pending",
             f"… {destination}",

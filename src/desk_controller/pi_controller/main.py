@@ -76,6 +76,11 @@ from desk_controller.pi_controller.ha_toggle import (
     read_toggle_state,
 )
 from desk_controller.pi_controller.integrations.homeassistant import HomeAssistantClient
+from desk_controller.pi_controller.kvm_convergence import (
+    TOGGLE,
+    KVMConvergence,
+    KVMConvergenceState,
+)
 from desk_controller.pi_controller.release_update import PiReleaseUpdate
 from desk_controller.pi_controller.streamdeck_layout import (
     DYNAMIC_DATETIME_ACTIONS,
@@ -239,6 +244,18 @@ class DeskControllerApp:
             else None
         )
         self._clock_display_minute: Optional[str] = None
+        # When the Pi owns a hub that reports its real upstream host, that
+        # reading *is* the selected computer, and the convergence loop keeps
+        # USB and then the monitor working toward each request until both
+        # arrive. Other ownership modes keep the one-shot transaction below.
+        self._kvm_convergence: Optional[KVMConvergence] = None
+        if self._usb_host_is_observable():
+            self._kvm_convergence = KVMConvergence(
+                read_usb=self.acroname.read_upstream_channel,
+                set_usb=self.acroname.switch_upstream_channel,
+                set_monitor=self._converge_monitor,
+                on_change=self._on_kvm_convergence_change,
+            )
 
         # Setup MQTT Client with HA credentials
         mqtt_conf = self.config.get("mqtt", {})
@@ -436,6 +453,87 @@ class DeskControllerApp:
 
     def _pi_controls_usb(self) -> bool:
         return self._resolve_kvm_controller("usb") == "pi"
+
+    def _usb_host_is_observable(self) -> bool:
+        """The Pi owns a USB hub whose current host can be read back."""
+        return (
+            self._pi_controls_usb()
+            and getattr(self.acroname, "DRIVER", "") == "acroname"
+            and callable(getattr(self.acroname, "read_upstream_channel", None))
+        )
+
+    def _converge_monitor(self, host: int) -> bool:
+        """Send the monitor to ``host`` through whoever can currently reach it.
+
+        An ``active_workstation`` monitor is often only reachable from the
+        computer it is showing, so try the owner for the last host it was
+        sent to first, then the destination's owner.
+        """
+        shown = getattr(self, "_monitor_shown_pc", None)
+        # The monitor may have been changed by hand, so whichever computer it
+        # shows now is the last fallback even when a previous host is known.
+        hosts = ([shown] if shown in (0, 1) else []) + [host, 1 - host]
+        owners = []
+        for candidate in hosts:
+            owner = self._resolve_kvm_controller("monitor", candidate)
+            if owner and owner not in owners:
+                owners.append(owner)
+        if not owners:
+            logger.error("Monitor owner is not configured correctly")
+            return False
+        for owner in owners:
+            if self._kvm_monitor_set(owner, host, uuid4()):
+                self._monitor_shown_pc = host
+                return True
+        return False
+
+    def _on_kvm_convergence_change(self, state: KVMConvergenceState) -> None:
+        """Make every consumer follow the host the USB hub reports."""
+        with self._kvm_lock:
+            host_changed = (
+                state.usb_host is not None and state.usb_host != self.current_pc
+            )
+            if state.usb_host is not None:
+                self.current_pc = state.usb_host
+            self.kvm_fault = state.usb_host is None
+            # Workstation actions wait only while USB itself is moving; a
+            # monitor that is still being retried must not block them.
+            self._kvm_switch_in_flight = (
+                state.target is not None and state.usb_host != state.target
+            )
+            self._kvm_pending_target = state.target if state.pending else None
+            if host_changed:
+                self._refresh_workstation_deck()
+                self._apply_active_audio_state()
+        host = self._observed_host()
+        self.mqtt.publish("desk/kvm/state", (host or "unknown").upper(), retain=True)
+        self.mqtt.publish(
+            "desk/kvm/availability",
+            "online" if host else "offline",
+            retain=True,
+        )
+        self._update_sd_keys()
+        if host_changed:
+            self._publish_streamdeck_layout()
+        self._publish_streamdeck_state()
+
+    def _kvm_view(self) -> tuple[Optional[str], bool, Optional[int], bool]:
+        """(selected host, switch pending, destination, fault) for displays."""
+        convergence = getattr(self, "_kvm_convergence", None)
+        if convergence is not None:
+            state = convergence.state()
+            return (
+                self._observed_host(),
+                state.pending,
+                state.target if state.pending else None,
+                state.retrying or state.usb_host is None,
+            )
+        return (
+            self._observed_host(),
+            bool(getattr(self, "_kvm_switch_in_flight", False)),
+            getattr(self, "_kvm_pending_target", None),
+            bool(getattr(self, "kvm_fault", False)),
+        )
 
     def _usb_sentinel_config(self) -> USBSentinelConfig:
         values = self.config.get("usb_switch", {})
@@ -748,7 +846,16 @@ class DeskControllerApp:
         (up to remote_timeout-second) round trip to a workstation agent.
         Repeated calls while a switch is already running are ignored rather
         than queued, so rapid button mashing doesn't pile up serial delays.
+
+        With an observable USB hub the request goes to the convergence loop
+        instead: the latest request wins and is retried until it arrives.
         """
+        convergence = getattr(self, "_kvm_convergence", None)
+        if convergence is not None:
+            convergence.request(TOGGLE if target_pc is None else target_pc)
+            self._update_sd_keys()
+            self._publish_streamdeck_state()
+            return True
         with getattr(self, "_kvm_admission_lock", self._kvm_lock):
             worker = getattr(self, "_kvm_worker", None)
             if getattr(self, "_kvm_switch_in_flight", False) or (
@@ -815,6 +922,10 @@ class DeskControllerApp:
 
     def _reconcile_kvm_state(self) -> bool:
         """Re-read ownership state and align USB without changing the monitor."""
+        convergence = getattr(self, "_kvm_convergence", None)
+        if convergence is not None:
+            convergence.retry_now()
+            return convergence.state().usb_host is not None
         with self._kvm_lock:
             success = self._initialize_kvm_state()
             self._apply_active_audio_state()
@@ -834,6 +945,10 @@ class DeskControllerApp:
             return success
 
     def _start_kvm_reconcile(self) -> bool:
+        convergence = getattr(self, "_kvm_convergence", None)
+        if convergence is not None:
+            convergence.retry_now()
+            return True
         with getattr(self, "_kvm_admission_lock", self._kvm_lock):
             worker = getattr(self, "_kvm_worker", None)
             if getattr(self, "_kvm_switch_in_flight", False) or (
@@ -1299,6 +1414,10 @@ class DeskControllerApp:
         )
 
     def _observed_host(self) -> Optional[str]:
+        convergence = getattr(self, "_kvm_convergence", None)
+        if convergence is not None:
+            usb_host = convergence.state().usb_host
+            return f"pc{usb_host + 1}" if usb_host in (0, 1) else None
         source = getattr(self, "_monitor_source", None)
         if source in {"pc1", "pc2", "pi"}:
             return source
@@ -2074,13 +2193,21 @@ class DeskControllerApp:
             )
         else:
             observed = status.get("active_upstream")
-            status["desired_upstream"] = self.current_pc
+            convergence = getattr(self, "_kvm_convergence", None)
+            desired = (
+                convergence.state().target
+                if convergence is not None and convergence.state().target is not None
+                else self.current_pc
+            )
+            status["desired_upstream"] = desired
             status["observed_upstream"] = observed
             status["sync_status"] = (
                 "not_applicable"
                 if driver == "none"
+                else "unknown"
+                if observed is None
                 else "synced"
-                if observed == self.current_pc
+                if observed == desired
                 else "diverged"
             )
         return status
@@ -2099,7 +2226,12 @@ class DeskControllerApp:
         target = settings.get("active_upstream")
         if target not in (0, 1):
             return {"success": False, "error": "Invalid upstream host"}
-        success = self._switch_kvm(target)
+        convergence = getattr(self, "_kvm_convergence", None)
+        if convergence is not None:
+            generation = convergence.request(target)
+            success = convergence.wait_for_usb(target, generation, timeout=10)
+        else:
+            success = self._switch_kvm(target)
         return {
             "success": success,
             "error": None if success else "KVM switch failed",
@@ -2406,6 +2538,8 @@ class DeskControllerApp:
             requested_pc = 0 if target == "pc1" else 1 if target == "pc2" else None
             if requested_pc is None:
                 logger.error("Invalid direct KVM target on key %s", key)
+            elif getattr(self, "_kvm_convergence", None) is not None:
+                action_succeeded = self._start_kvm_switch(requested_pc)
             elif (
                 requested_pc == self.current_pc
                 and not self.kvm_fault
@@ -2537,11 +2671,12 @@ class DeskControllerApp:
     def _status_visual(self, key: int, button: Dict[str, Any]) -> Optional[StatusKey]:
         action = button.get("action_type")
         if action == "kvm_toggle":
+            host, pending, destination, fault = self._kvm_view()
             return host_status(
-                self._observed_host(),
-                pending=bool(getattr(self, "_kvm_switch_in_flight", False)),
-                pending_pc=getattr(self, "_kvm_pending_target", None),
-                fault=bool(getattr(self, "kvm_fault", False)),
+                host,
+                pending=pending,
+                pending_pc=destination,
+                fault=fault,
             )
         if action == "ha_toggle":
             return ha_toggle_status(
@@ -2624,12 +2759,13 @@ class DeskControllerApp:
                     )
                 )
             elif action_type == "kvm_select":
-                is_pending = bool(getattr(self, "_kvm_switch_in_flight", False))
-                active = (
-                    not self.kvm_fault
-                    and str(button.get("target")) == self._observed_host()
+                host, is_pending, _destination, kvm_fault = self._kvm_view()
+                # The key for the computer USB is on stays lit even while a
+                # monitor step is retrying; red only marks the retry.
+                active = str(button.get("target")) == host and (
+                    getattr(self, "_kvm_convergence", None) is not None or not kvm_fault
                 )
-                if self.kvm_fault:
+                if kvm_fault:
                     color = (255, 60, 60)
             elif action_type == "workstation_slot":
                 is_available = bool(
@@ -2891,7 +3027,9 @@ class DeskControllerApp:
             logger.warning(
                 "MQTT did not connect within 10 seconds; retrying in background"
             )
-        if local_usb_ready:
+        if self._kvm_convergence is not None:
+            self._kvm_convergence.start()
+        elif local_usb_ready:
             self._reconcile_kvm_state()
         self._last_monitor_check = time.monotonic()
         update_health_after = time.monotonic() + 15
@@ -2940,6 +3078,8 @@ class DeskControllerApp:
         except KeyboardInterrupt:
             logger.info("Stopping application...")
         finally:
+            if self._kvm_convergence is not None:
+                self._kvm_convergence.stop()
             self.mqtt.stop()
             self.streamdeck.close()
             self.acroname.disconnect()

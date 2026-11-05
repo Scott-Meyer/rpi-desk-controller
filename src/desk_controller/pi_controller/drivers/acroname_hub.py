@@ -157,6 +157,24 @@ class AcronameHubController:
                 logger.error(f"Failed to switch Acroname channel: {e}")
                 return False
 
+    def read_upstream_channel(self) -> Optional[int]:
+        """Read which host currently owns USB from the hub itself.
+
+        Returns ``0`` (PC1) or ``1`` (PC2) only from a fresh hardware reading,
+        and ``None`` whenever the hub cannot be read. It never substitutes the
+        last commanded channel, so callers can verify a switch with it.
+        """
+        with self._lock:
+            if self.simulate:
+                return self.active_channel
+            if not BRAINSTEM_AVAILABLE or not self.connected:
+                return None
+            upstream_state = self._read_result("getUpstreamState")
+            if upstream_state not in (0, 1):
+                return None
+            self.active_channel = int(upstream_state)
+            return self.active_channel
+
     @staticmethod
     def _serializable(value: Any) -> Any:
         if isinstance(value, bytes):
@@ -399,7 +417,9 @@ class AcronameHubController:
                     "uptime_seconds": None,
                     "name": self._simulated_name,
                 }
+                observed_upstream = self.active_channel
             elif not BRAINSTEM_AVAILABLE or not self.connected:
+                observed_upstream = None
                 identity = {
                     "model": None,
                     "serial_number": self.serial_number,
@@ -428,8 +448,11 @@ class AcronameHubController:
                     else None
                 )
                 upstream_state = self._read_result("getUpstreamState")
-                if upstream_state in (0, 1):
-                    self.active_channel = int(upstream_state)
+                observed_upstream = (
+                    int(upstream_state) if upstream_state in (0, 1) else None
+                )
+                if observed_upstream is not None:
+                    self.active_channel = observed_upstream
                 identity = {
                     "model": self._read_system_result("getModel"),
                     "serial_number": serial_number,
@@ -466,7 +489,8 @@ class AcronameHubController:
                 "connected": self.connected,
                 "driver": self.DRIVER,
                 "manufacturer": self.MANUFACTURER,
-                "active_upstream": self.active_channel,
+                # A failed reading is unknown, never the last command.
+                "active_upstream": observed_upstream,
                 "state_feedback": True,
                 "capabilities": {
                     "upstream_switch": True,
