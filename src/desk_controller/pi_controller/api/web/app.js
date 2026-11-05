@@ -38,6 +38,7 @@ let liveTogglePending = {};
 let liveToggleFailures = new Set();
 let liveSceneStatus = {};
 let liveScenePending = new Set();
+let liveSceneErrors = new Set();
 let liveDeckVisuals = {};
 let liveKvmHost = null;
 let liveKvmFault = false;
@@ -217,6 +218,7 @@ function renderConnectionStatus(status) {
   liveToggleFailures = new Set(status.ha_failures || []);
   liveSceneStatus = status.scene_status || {};
   liveScenePending = new Set(status.scene_pending || []);
+  liveSceneErrors = new Set(status.scene_errors || []);
   liveDeckVisuals = status.deck_visuals || {};
   liveKvmHost = status.active_host || null;
   liveKvmFault = Boolean(status.kvm_fault);
@@ -472,6 +474,7 @@ function renderDeck() {
     // Scene keys keep their label; pending is only the dotted border.
     const scenePending = isScene && liveScenePending.has(key);
     const failed = observed && liveToggleFailures.has(key);
+    const sceneError = isScene && liveSceneErrors.has(key);
     let label = button.enabled
       ? (toggleState === "active" ? (button.active_label || button.label)
         : toggleState === "unavailable" && button.action_type === "ha_toggle" ? "UNAVAILABLE"
@@ -486,7 +489,7 @@ function renderDeck() {
     element.classList.toggle("active", toggleState === "active" || sceneStatus === "active"
       || (button.action_type === "kvm_select" && !liveKvmFault && button.target === liveKvmHost));
     element.classList.toggle("pending", Boolean(pending) || scenePending);
-    element.classList.toggle("error", Boolean(failed && !pending));
+    element.classList.toggle("error", Boolean(failed && !pending) || sceneError);
     const position = document.createElement("span");
     position.className = "deck-position";
     position.textContent = key + 1;

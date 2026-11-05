@@ -238,6 +238,8 @@ class DeskControllerApp:
         # Scene presses wait for Home Assistant to report the scene (or "off")
         # before the key settles; group -> {"key", "want", "deadline"}.
         self._scene_pending: Dict[str, Dict[str, Any]] = {}
+        # key -> monotonic time until which a failed press shows a red border
+        self._scene_error_until: Dict[int, float] = {}
         self._scene_lock = threading.RLock()
         self._last_monitor_check = 0.0
         self._monitor_observer: Optional[threading.Thread] = None
@@ -357,6 +359,7 @@ class DeskControllerApp:
             "ha_failures": list(getattr(self, "_ha_toggle_failures", set())),
             "scene_status": self._scene_statuses(),
             "scene_pending": self._scene_pending_keys(),
+            "scene_errors": self._scene_error_keys(),
             "keypad_leds": dict(getattr(self, "_keypad_led_states", {})),
             "keypad_pending": list(getattr(self, "_keypad_pending", set())),
             "keypad_failures": list(getattr(self, "_keypad_failures", set())),
@@ -2073,6 +2076,7 @@ class DeskControllerApp:
                 "ha_failures": list(getattr(self, "_ha_toggle_failures", set())),
                 "scene_status": self._scene_statuses(),
                 "scene_pending": self._scene_pending_keys(),
+                "scene_errors": self._scene_error_keys(),
                 "keypad_leds": dict(getattr(self, "_keypad_led_states", {})),
                 "keypad_pending": list(getattr(self, "_keypad_pending", set())),
                 "keypad_failures": list(getattr(self, "_keypad_failures", set())),
@@ -2817,9 +2821,12 @@ class DeskControllerApp:
                     else button.get("icon", "none")
                 ),
                 has_error=bool(
-                    action_type in {"ha_toggle", "ha_state_action"}
-                    and not is_pending
-                    and key in getattr(self, "_ha_toggle_failures", set())
+                    (
+                        action_type in {"ha_toggle", "ha_state_action"}
+                        and not is_pending
+                        and key in getattr(self, "_ha_toggle_failures", set())
+                    )
+                    or (action_type == "ha_scene" and key in self._scene_error_keys())
                 ),
                 is_active=active,
                 accent_color=color,
@@ -2837,9 +2844,10 @@ class DeskControllerApp:
         """Run a scene key: pending until Home Assistant reports the result.
 
         Pressing the key of the scene that is active runs its ``off_target``
-        instead. The key shows pending until Home Assistant reports that scene
-        (or no scene, for off), and fails visibly if Home Assistant rejects the
-        call or the result does not appear within ``SCENE_CONFIRM_SECONDS``.
+        instead. The key shows the dotted pending border until Home Assistant
+        reports that scene (or no scene, for off). If Home Assistant rejects
+        the call or the result does not appear within ``SCENE_CONFIRM_SECONDS``,
+        the key shows a short red border, then returns to its observed state.
         A newer press in the same group replaces an older pending one.
         """
         group = str(button.get("group", "")).strip() or f"key-{key}"
@@ -2858,6 +2866,12 @@ class DeskControllerApp:
                 # Home Assistant has told us who they are.
                 "lights": None,
             }
+            self._scene_error_until.pop(key, None)
+        pressed_at = time.monotonic()
+        # Draw pending before Home Assistant is asked, so even an instant
+        # rejection is seen.
+        self._update_sd_keys()
+        self._publish_streamdeck_state()
 
         def run():
             if turning_off:
@@ -2875,6 +2889,9 @@ class DeskControllerApp:
             except Exception:
                 logger.exception("Home Assistant scene call on key %s failed", key)
                 accepted = False
+            if not accepted:
+                # Let the pending border be seen before the error replaces it.
+                time.sleep(max(0.0, pressed_at + 0.5 - time.monotonic()))
             with self._scene_lock:
                 item = self._scene_pending.get(group)
                 if item is not None and item["id"] == request:
@@ -2883,6 +2900,7 @@ class DeskControllerApp:
                         self._scene_pending.pop(group, None)
                         if not accepted:
                             logger.warning("Home Assistant rejected scene key %s", key)
+                            self._flash_scene_error(key)
                     else:
                         item["phase"] = "accepted"
                         # Count the confirmation window from Home Assistant's
@@ -2895,8 +2913,34 @@ class DeskControllerApp:
             self._publish_streamdeck_state()
 
         threading.Thread(target=run, name=f"ha-scene-{key}", daemon=True).start()
-        self._update_sd_keys()
-        self._publish_streamdeck_state()
+
+    SCENE_ERROR_SECONDS = 2.0
+
+    def _flash_scene_error(self, key: int) -> None:
+        """Show a short red border on ``key``, then redraw it as observed."""
+        with self._scene_lock:
+            self._scene_error_until[key] = time.monotonic() + self.SCENE_ERROR_SECONDS
+
+        def clear():
+            with self._scene_lock:
+                if self._scene_error_until.get(key, 0.0) <= time.monotonic():
+                    self._scene_error_until.pop(key, None)
+            self._update_sd_keys()
+            self._publish_streamdeck_state()
+
+        timer = threading.Timer(self.SCENE_ERROR_SECONDS + 0.05, clear)
+        timer.daemon = True
+        timer.start()
+
+    def _scene_error_keys(self) -> list[int]:
+        """Scene keys currently showing the short red error border."""
+        now = time.monotonic()
+        with getattr(self, "_scene_lock", threading.RLock()):
+            return [
+                key
+                for key, until in getattr(self, "_scene_error_until", {}).items()
+                if until > now
+            ]
 
     def _scene_key_status(self, key: int) -> Optional[str]:
         """``pending``/``turning_off``, ``active``, or ``None``."""
@@ -2969,6 +3013,7 @@ class DeskControllerApp:
                         item["key"],
                     )
                     self._scene_pending.pop(group)
+                    self._flash_scene_error(item["key"])
                     changed = True
         return changed
 
