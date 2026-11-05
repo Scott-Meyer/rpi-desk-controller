@@ -346,10 +346,12 @@ class ScenePressTests(unittest.TestCase):
         self.press(6)  # DIM
 
         self.assertEqual(self.app._scene_key_status(6), "pending")
-        self.assertEqual(self.app._scene_statuses(), {6: "pending", 8: "active"})
+        self.assertEqual(
+            self.app._scene_statuses(), {6: "pending", 8: "active", 10: "active"}
+        )
         release.set()
         self.assertTrue(self.status_becomes(6, "active"))
-        self.assertEqual(self.app._scene_statuses(), {6: "active"})
+        self.assertEqual(self.app._scene_statuses(), {6: "active", 10: "active"})
 
     def test_home_assistant_rejecting_the_scene_shows_a_failure(self):
         self.ha.accept = False
@@ -441,6 +443,69 @@ class ScenePressTests(unittest.TestCase):
         releases[1].set()  # the newer press succeeds
 
         self.assertTrue(self.status_becomes(6, "active"))
+
+    def test_a_reading_started_before_acceptance_cannot_confirm_it(self):
+        for entity, saved in self.ha.definitions["dim"]["entities"].items():
+            self.ha.states[entity] = light(
+                saved["brightness"], saved.get("color_temp_kelvin")
+            )
+        observer, release = self.app._scene_observer, threading.Event()
+        refresh = observer.refresh
+
+        def held_refresh(buttons):
+            result = refresh(buttons)  # reads DIM now...
+            release.wait(2)  # ...and reports it later
+            return result
+
+        observer.refresh = held_refresh
+        old_reading = threading.Thread(target=self.app._refresh_scene_keys)
+        old_reading.start()
+        time.sleep(0.05)
+        self.ha.apply = False  # the newer press is accepted but never applied
+        self.ha.states[SILENT] = light(200)  # and the lights have moved on
+        observer.refresh = refresh
+        self.app._start_scene_refresh = lambda: None  # no newer reading yet
+        self.press(6)
+        self.assertTrue(
+            eventually_true(
+                lambda: self.app._scene_pending["lighting"]["phase"] == "accepted"
+            )
+        )
+
+        release.set()
+        old_reading.join(2)
+
+        self.assertEqual(self.app._scene_key_status(6), "pending")
+
+    def test_off_waits_for_the_scene_lights_when_they_could_not_be_read(self):
+        scene = "scene.scotts_room_lights_medium"
+        get_state, failed_once = self.ha.get_state, []
+
+        def first_read_fails(entity_id):
+            if entity_id == scene and not failed_once:
+                failed_once.append(True)
+                return {}
+            return get_state(entity_id)
+
+        self.ha.get_state = first_read_fails
+        trigger = self.ha.trigger_automation
+
+        def partly_off(automation):
+            trigger(automation)
+            self.ha.states[SILENT] = light(40)  # one light stays on
+            return True
+
+        self.ha.trigger_automation = partly_off
+        self.app.SCENE_CONFIRM_SECONDS = 0.2
+
+        self.press(8)
+        time.sleep(0.05)
+        self.app._refresh_scene_keys()
+        self.assertEqual(self.app._scene_key_status(8), "turning_off")
+        time.sleep(0.25)
+        self.app._refresh_scene_keys()
+
+        self.assertEqual(self.app._scene_key_status(8), "failed")
 
     def test_pressing_the_lit_scene_turns_the_lights_off(self):
         self.press(8)

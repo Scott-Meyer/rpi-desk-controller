@@ -2865,24 +2865,20 @@ class DeskControllerApp:
                 "key": key,
                 "want": None if turning_off else key,
                 "deadline": time.monotonic() + self.SCENE_CONFIRM_SECONDS,
-                "lights": [],  # for off: the scene's lights that must report off
+                "scene": str(button["target"]).strip(),
+                # For off: the scene's lights that must report off; None until
+                # Home Assistant has told us who they are.
+                "lights": None,
             }
             self._scene_failures.pop(key, None)
 
         def run():
             if turning_off:
-                members = (
-                    self.ha.get_state(str(button["target"]).strip()).get("attributes")
-                    or {}
-                ).get("entity_id", [])
+                lights = self._scene_lights(str(button["target"]).strip())
                 with self._scene_lock:
                     item = self._scene_pending.get(group)
                     if item and item["id"] == request:
-                        item["lights"] = [
-                            e
-                            for e in members
-                            if str(e).startswith(("light.", "switch.", "fan."))
-                        ]
+                        item["lights"] = lights
             try:
                 accepted = (
                     self.ha.trigger_automation(off_target)
@@ -2940,11 +2936,13 @@ class DeskControllerApp:
         self,
         observed: set[str],
         lights_off: Optional[Dict[str, bool]] = None,
+        settleable: Optional[set] = None,
     ) -> bool:
         """Settle pending scene presses against a fresh Home Assistant reading.
 
-        Only presses Home Assistant has accepted are settled, and only from
-        groups ``observed`` in this refresh. A scene press is confirmed when its
+        Only presses Home Assistant had accepted before this reading started
+        (``settleable`` request ids) are settled, and only from groups
+        ``observed`` in it. A scene press is confirmed when its
         key becomes the group's active scene. An off press is confirmed when
         the scene's lights all report off (``lights_off[group]``); for a scene
         with no lights Home Assistant can observe, when no scene of the group
@@ -2957,11 +2955,12 @@ class DeskControllerApp:
                 if item["phase"] != "accepted":
                     continue
                 done = False
-                if group in observed:
+                fresh = settleable is None or item["id"] in settleable
+                if fresh and group in observed:
                     if item["want"] is None:
                         done = (
                             lights_off.get(group, False)
-                            if item["lights"]
+                            if item["lights"] != []  # unknown or real lights
                             else self.active_groups.get(group) != item["key"]
                         )
                     else:
@@ -2994,18 +2993,39 @@ class DeskControllerApp:
                     changed = True
         return changed
 
+    def _scene_lights(self, scene: str) -> Optional[list]:
+        """The lights, switches and fans a scene controls; None if unknown."""
+        state = self.ha.get_state(scene)
+        if not state or state.get("state") == "unavailable":
+            return None
+        members = (state.get("attributes") or {}).get("entity_id", [])
+        return [e for e in members if str(e).startswith(("light.", "switch.", "fan."))]
+
     def _scene_lights_off(self) -> Dict[str, bool]:
         """For pending off presses: whether their scene's lights all read off."""
         with self._scene_lock:
             wanted = {
-                group: list(item["lights"])
+                group: (item["id"], item["scene"], item["lights"])
                 for group, item in self._scene_pending.items()
-                if item["want"] is None and item["lights"]
+                if item["want"] is None and item["lights"] != []
             }
-        return {
-            group: all(self.ha.get_state(e).get("state") == "off" for e in lights)
-            for group, lights in wanted.items()
-        }
+        result = {}
+        for group, (request, scene, lights) in wanted.items():
+            if lights is None:
+                lights = self._scene_lights(scene)
+                if lights is None:
+                    result[group] = False  # still unknown: cannot confirm off
+                    continue
+                with self._scene_lock:
+                    item = self._scene_pending.get(group)
+                    if item and item["id"] == request:
+                        item["lights"] = lights
+                if not lights:
+                    continue  # no observable lights: decided by the scene state
+            result[group] = all(
+                self.ha.get_state(e).get("state") == "off" for e in lights
+            )
+        return result
 
     def _start_scene_refresh(self) -> bool:
         """Refresh scene keys off the main loop; one refresh at a time."""
@@ -3022,6 +3042,14 @@ class DeskControllerApp:
         """Light the scene keys Home Assistant reports as current."""
         # Scene keys show what Home Assistant reports right now, wherever the
         # scene was started, rather than what this deck pressed since start.
+        with self._scene_lock:
+            # Only requests already accepted when this reading starts can be
+            # settled by it; a newer one waits for a reading taken after it.
+            settleable = {
+                item["id"]
+                for item in self._scene_pending.values()
+                if item["phase"] == "accepted"
+            }
         try:
             scene_groups = self._scene_observer.refresh(self.physical_buttons)
         except Exception:
@@ -3036,7 +3064,9 @@ class DeskControllerApp:
                     self.active_groups[group] = key
                 changed = True
         changed = (
-            self._confirm_scene_presses(set(scene_groups), self._scene_lights_off())
+            self._confirm_scene_presses(
+                set(scene_groups), self._scene_lights_off(), settleable
+            )
             or changed
         )
         if changed:
