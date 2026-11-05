@@ -117,18 +117,6 @@ class HomeAssistantClient:
         domain = entity_id.split(".", 1)[0]
         return self.call_service(f"{domain}.toggle", entity_id)
 
-    def get_states(self) -> list:
-        """Fetch every entity state, or ``[]`` when Home Assistant is unreachable."""
-        try:
-            res = requests.get(
-                f"{self.base_url}/api/states", headers=self.headers, timeout=5
-            )
-            if res.status_code == 200:
-                return res.json()
-        except Exception as e:
-            logger.error(f"Error fetching HA states: {e}")
-        return []
-
     def get_scene_config(self, scene_id: str) -> Optional[dict]:
         """Fetch a Home Assistant-defined scene's stored entity states.
 

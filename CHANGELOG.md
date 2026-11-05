@@ -4,12 +4,12 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
-- Scene keys (lights, shades) show what Home Assistant reports right now, so
-  the active key survives restarts and reflects changes made anywhere. Home
-  Assistant-defined scenes match their stored entity states; integration
-  scenes (such as shade-gateway scenes) are learned from Home Assistant the
-  next time they run (which covers moved, and where to), then matched by
-  cover position. Until learned, the most recently activated scene is shown.
+- Scene keys show what Home Assistant reports right now, so the active key
+  survives restarts and reflects changes made anywhere. Home Assistant-defined
+  scenes (the light scenes) are matched against their stored states:
+  brightness, colour, and effect. Integration-owned scenes whose targets Home
+  Assistant does not hold (PowerView shade scenes) show the most recently
+  activated scene.
 - With a Pi-owned Acroname hub, the selected computer is always the host the
   hub reports. The Stream Deck, MQTT state, audio, and workstation keys
   follow it, including when the monitor step fails or USB is moved by

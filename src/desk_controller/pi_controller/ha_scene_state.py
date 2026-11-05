@@ -1,18 +1,15 @@
 """Which scene key in each group is active, according to Home Assistant.
 
 A scene key is active when what Home Assistant reports right now matches what
-that scene sets. Where a scene's effect comes from:
+that scene sets. Home Assistant-defined scenes store their entity states, so
+those are read from Home Assistant's scene configuration and compared with
+the entities' current states.
 
-* Home Assistant-defined scenes store their entity states; those are read
-  from Home Assistant's scene configuration.
-* Scenes owned by an integration (for example a shade gateway) keep their
-  contents elsewhere. Home Assistant still shows what they did: after such a
-  scene is activated, the covers that moved and where they stopped are
-  recorded and kept, then used for matching from then on.
-
-Until a scene's effect is known, its key falls back to history: the scene
-Home Assistant activated most recently in the group, unless the group's
-``off_target`` ran afterwards or every light it controls is now off.
+Scenes owned by an integration (for example a PowerView shade gateway) keep
+their targets outside Home Assistant; their effect is unknown. Their group
+falls back to history: the scene Home Assistant activated most recently,
+unless the group's ``off_target`` ran afterwards or every light it controls
+is now off.
 
 ``SceneObserver.refresh`` is the entry point; ``active_scene_keys`` is the
 pure decision it makes from states and known effects.
@@ -20,18 +17,14 @@ pure decision it makes from states and known effects.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
 _SWITCHABLE = ("light.", "switch.", "fan.")
-_MATCHED_ATTRIBUTES = ("brightness", "color_temp_kelvin", "current_position")
 _TOLERANCE = {"brightness": 3, "color_temp_kelvin": 150, "current_position": 3}
 
 Effect = Mapping[str, Mapping[str, Any]]  # entity_id -> expected values
@@ -59,18 +52,38 @@ def _readable(state: Mapping[str, Any]) -> bool:
 
 
 def effect_from_scene_config(config: Mapping[str, Any]) -> Effect:
-    """The comparable part of a Home Assistant scene definition."""
+    """The comparable part of a Home Assistant scene definition.
+
+    Brightness, the colour in the representation the scene saved it in, and
+    the light effect are kept; everything else is snapshot metadata.
+    """
     effect = {}
     for entity_id, stored in (config.get("entities") or {}).items():
         if not isinstance(stored, Mapping) or "state" not in stored:
             continue
-        expected = {"state": str(stored["state"])}
+        expected: Dict[str, Any] = {"state": str(stored["state"])}
         if expected["state"] == "on":
-            for attribute in _MATCHED_ATTRIBUTES:
+            for attribute in ("brightness", "current_position", "effect"):
                 if stored.get(attribute) is not None:
                     expected[attribute] = stored[attribute]
+            mode = stored.get("color_mode")
+            if mode in (None, "color_temp") and stored.get("color_temp_kelvin"):
+                expected["color_temp_kelvin"] = stored["color_temp_kelvin"]
+            elif mode in ("hs", "xy", "rgb", "rgbw", "rgbww") and stored.get(
+                "xy_color"
+            ):
+                expected["xy_color"] = stored["xy_color"]
+            elif mode not in (None, "brightness", "onoff", "color_temp"):
+                expected["unsupported"] = mode  # never claim it holds
         effect[entity_id] = expected
     return effect
+
+
+def _within(actual: Any, expected: Any, tolerance: float) -> bool:
+    try:
+        return abs(float(actual) - float(expected)) <= tolerance
+    except (TypeError, ValueError):
+        return False
 
 
 def effect_matches(
@@ -82,19 +95,27 @@ def effect_matches(
         if not _readable(state) or state.get("state") == "unknown":
             return None
         attributes = state.get("attributes") or {}
-        if "state" in expected and state.get("state") != expected["state"]:
+        if "unsupported" in expected:
             return False
-        for attribute in _MATCHED_ATTRIBUTES:
-            if attribute not in expected:
-                continue
-            actual = attributes.get(attribute)
-            try:
-                if (
-                    abs(float(actual) - float(expected[attribute]))
-                    > _TOLERANCE[attribute]
-                ):
-                    return False
-            except (TypeError, ValueError):
+        if state.get("state") != expected["state"]:
+            return False
+        for attribute, tolerance in _TOLERANCE.items():
+            if attribute in expected and not _within(
+                attributes.get(attribute), expected[attribute], tolerance
+            ):
+                return False
+        if "xy_color" in expected:
+            actual_xy = attributes.get("xy_color") or ()
+            if len(actual_xy) != 2 or not all(
+                _within(a, e, 0.02) for a, e in zip(actual_xy, expected["xy_color"])
+            ):
+                return False
+        if "effect" in expected:
+            no_effect = ("off", "none", None)
+            wanted, running = expected["effect"], attributes.get("effect")
+            if (wanted in no_effect) != (running in no_effect) or (
+                wanted not in no_effect and running != wanted
+            ):
                 return False
     return True
 
@@ -195,29 +216,21 @@ def _decide_from_history(by_recency, offs, matches, state_of):
 
 
 class SceneObserver:
-    """Keeps scene effects current and decides scene keys from Home Assistant.
+    """Reads scene definitions and decides scene keys from Home Assistant.
 
-    ``ha`` needs ``get_state``, ``get_states`` and ``get_scene_config``.
-    Effects learned for integration-owned scenes are saved to ``store_path``
-    so they survive restarts.
+    ``ha`` needs ``get_state`` and ``get_scene_config``.
     """
 
     CONFIG_REFRESH_SECONDS = 300
-    SETTLE_SECONDS = 45
-    LEARN_WINDOW_SECONDS = 600
 
-    def __init__(self, ha, store_path: Path, clock=time.time):
+    def __init__(self, ha, clock=time.time):
         self._ha = ha
-        self._store_path = Path(store_path)
         self._clock = clock
         self._defined: Dict[str, Effect] = {}  # from HA scene configuration
-        self._integration_owned: set[str] = set()
         self._configs_read_at = float("-inf")
-        self._learned = self._load()
 
     def effects(self) -> Dict[str, Effect]:
-        learned = {scene: item["entities"] for scene, item in self._learned.items()}
-        return {**learned, **self._defined}
+        return dict(self._defined)
 
     def refresh(
         self, buttons: Mapping[int, Mapping[str, Any]]
@@ -241,15 +254,17 @@ class SceneObserver:
         )
         if self._clock() - self._configs_read_at >= self.CONFIG_REFRESH_SECONDS:
             self._read_definitions(scenes, read)
-        for scene in scenes:
-            if scene in self._integration_owned:
-                self._learn(scene, read(scene))
         return active_scene_keys(buttons, read, self.effects())
 
     def _read_definitions(self, scenes, read) -> None:
+        """Refresh definitions; anything not answered keeps its last value."""
         complete = True
         for scene in scenes:
-            scene_id = (read(scene).get("attributes") or {}).get("id")
+            state = read(scene)
+            if not _readable(state):
+                complete = False
+                continue
+            scene_id = (state.get("attributes") or {}).get("id")
             config = self._ha.get_scene_config(str(scene_id)) if scene_id else {}
             if config is None:
                 complete = False
@@ -257,72 +272,7 @@ class SceneObserver:
             effect = effect_from_scene_config(config)
             if effect:
                 self._defined[scene] = effect
-                self._integration_owned.discard(scene)
             else:
-                self._defined.pop(scene, None)
-                self._integration_owned.add(scene)
+                self._defined.pop(scene, None)  # integration-owned: unknown
         if complete:
             self._configs_read_at = self._clock()
-
-    def _learn(self, scene: str, scene_state: Mapping[str, Any]) -> None:
-        """Record which covers a recent activation moved and where they stopped."""
-        activated = _activated_at(scene_state)
-        if activated is None:
-            return
-        known = self._learned.get(scene, {})
-        if known.get("activated") == activated.isoformat():
-            return
-        age = self._clock() - activated.timestamp()
-        if age < self.SETTLE_SECONDS or age > self.LEARN_WINDOW_SECONDS:
-            return
-        all_states = self._ha.get_states()
-        if not all_states:
-            return
-        window_end = activated + timedelta(seconds=self.LEARN_WINDOW_SECONDS)
-        moved = {}
-        for state in all_states:
-            entity_id = str(state.get("entity_id", ""))
-            if not entity_id.startswith("cover."):
-                continue
-            if state.get("state") in {"opening", "closing"}:
-                return  # still moving; look again on the next refresh
-            try:
-                changed = datetime.fromisoformat(str(state.get("last_changed")))
-            except ValueError:
-                continue
-            position = (state.get("attributes") or {}).get("current_position")
-            if activated <= changed <= window_end and position is not None:
-                moved[entity_id] = {"current_position": position}
-        if not moved and age < self.LEARN_WINDOW_SECONDS / 2:
-            return  # nothing has reported moving yet
-        entities = moved or known.get("entities")
-        if not entities:
-            return
-        self._learned[scene] = {
-            "activated": activated.isoformat(),
-            "entities": entities,
-        }
-        logger.info("Learned what %s does from Home Assistant: %s", scene, entities)
-        self._save()
-
-    def _load(self) -> Dict[str, Dict[str, Any]]:
-        try:
-            data = json.loads(self._store_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError):
-            logger.warning("Ignoring unreadable scene effects at %s", self._store_path)
-            return {}
-        return {
-            scene: item
-            for scene, item in data.items()
-            if isinstance(item, dict) and isinstance(item.get("entities"), dict)
-        }
-
-    def _save(self) -> None:
-        temporary = self._store_path.with_suffix(".tmp")
-        try:
-            temporary.write_text(json.dumps(self._learned, indent=2), encoding="utf-8")
-            os.replace(temporary, self._store_path)
-        except OSError:
-            logger.exception("Could not save learned scene effects")

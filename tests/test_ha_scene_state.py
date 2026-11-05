@@ -2,16 +2,15 @@
 
 The fake Home Assistant below is built from real states and scene
 definitions read from Scott's desk on 2026-11-05: the lights match LIGHTS
-MEDIUM, and the bedroom shade scenes are gateway scenes Home Assistant holds
-no definition for (last activated in September).
+MEDIUM (reported brightness 10/10/68 against saved 11/9/69), and the bedroom
+shade scenes are PowerView gateway scenes whose targets Home Assistant does
+not hold (last activated in September).
 """
 
 import copy
-import tempfile
 import threading
 import unittest
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import Mock
 
 from desk_controller.pi_controller.ha_scene_state import SceneObserver
@@ -126,22 +125,13 @@ class FakeHomeAssistant:
     def get_scene_config(self, scene_id):
         return copy.deepcopy(self.definitions.get(scene_id, {}))
 
-    def activate(self, scene, at, moves):
-        """Activate ``scene`` ``at`` (UTC ISO) and move covers as it does."""
-        self.states[scene]["state"] = at
-        for entity, position in moves.items():
-            self.states[entity] = cover(position, changed=at.replace(":00+", ":20+"))
-
 
 class SceneKeyTests(unittest.TestCase):
     def setUp(self):
         self.ha = FakeHomeAssistant()
-        self.store = Path(tempfile.mkdtemp()) / "scene_effects.json"
 
     def keys(self, observer=None):
-        observer = observer or SceneObserver(
-            self.ha, self.store, clock=lambda: self.ha.now
-        )
+        observer = observer or SceneObserver(self.ha, clock=lambda: self.ha.now)
         return observer.refresh(BUTTONS)
 
     def test_the_desk_today_shows_lights_medium_and_shades_close(self):
@@ -166,30 +156,39 @@ class SceneKeyTests(unittest.TestCase):
 
         self.assertIsNone(self.keys()["lighting"])
 
-    def test_shade_scene_learns_what_it_did_and_then_follows_the_shades(self):
-        observer = SceneObserver(self.ha, self.store, clock=lambda: self.ha.now)
-        self.ha.activate(
-            PRIVACY, "2026-11-05T02:39:00+00:00", {BLACKOUT: 100, PRIVACY_SHADE: 0}
-        )
-        self.assertEqual(self.keys(observer)["shades"], 11)
+    def test_same_brightness_with_a_different_colour_is_not_the_scene(self):
+        self.ha.states[STRIP] = light(30, 6500)
 
-        # Opened from the shade remote: no scene ran, but the shades moved.
-        self.ha.states[PRIVACY_SHADE] = cover(100)
-        self.assertIsNone(self.keys(observer)["shades"])
+        self.assertIsNone(self.keys()["lighting"])
 
-        # Back where PRIVACY puts them, after a restart (a fresh observer).
-        self.ha.states[PRIVACY_SHADE] = cover(0)
-        self.ha.now += 3600
+    def test_a_running_light_effect_is_not_the_scene(self):
+        self.ha.states[STRIP]["attributes"]["effect"] = "candle"
+
+        self.assertIsNone(self.keys()["lighting"])
+
+    def test_shade_scenes_without_targets_in_ha_show_the_last_activated(self):
+        # The gateway keeps PowerView scene positions in the shades; Home
+        # Assistant cannot say whether they still hold, so history decides.
+        self.ha.states[PRIVACY]["state"] = "2026-11-05T02:39:00+00:00"
+
         self.assertEqual(self.keys()["shades"], 11)
 
-    def test_shades_still_moving_are_not_learned_yet(self):
-        observer = SceneObserver(self.ha, self.store, clock=lambda: self.ha.now)
-        self.ha.activate(CLOSE, "2026-11-05T02:39:00+00:00", {BLACKOUT: 40})
-        self.ha.states[BLACKOUT]["state"] = "closing"
+    def test_known_definitions_survive_a_home_assistant_blip(self):
+        observer = SceneObserver(self.ha, clock=lambda: self.ha.now)
+        self.assertEqual(self.keys(observer)["lighting"], 8)
+        saved = copy.deepcopy(self.ha.states)
+        self.ha.states = {}  # outage during the definition refresh
+        self.ha.now += SceneObserver.CONFIG_REFRESH_SECONDS
+        self.assertEqual(self.keys(observer), {})
 
-        self.keys(observer)
-
-        self.assertNotIn(CLOSE, observer.effects())
+        self.ha.states = saved  # back, before the next definition refresh
+        # MEETING BRIGHT ran later, but the lights still match MEDIUM; only a
+        # retained definition can tell.
+        self.ha.states["scene.scotts_room_lights_meeting_bright"]["state"] = (
+            "2026-11-05T02:35:00+00:00"
+        )
+        self.ha.get_scene_config = lambda _scene_id: None  # still not answering
+        self.assertEqual(self.keys(observer)["lighting"], 8)
 
     def test_missing_or_unavailable_newest_scene_changes_nothing(self):
         for broken in ({}, {"state": "unavailable", "attributes": {}}):
@@ -214,9 +213,7 @@ class SceneKeysAfterRestartTests(unittest.TestCase):
         app.homeassistant_enabled = True
         app.physical_buttons = BUTTONS
         app.ha = Mock(wraps=ha)
-        app._scene_observer = SceneObserver(
-            ha, Path(tempfile.mkdtemp()) / "effects.json", clock=lambda: ha.now
-        )
+        app._scene_observer = SceneObserver(ha, clock=lambda: ha.now)
         app.active_groups = {}  # nothing pressed since the restart
         app._ha_toggle_states = {}
         app._ha_toggle_pending = {}

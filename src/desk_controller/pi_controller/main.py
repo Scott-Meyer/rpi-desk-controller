@@ -159,9 +159,7 @@ class DeskControllerApp:
             base_url=ha_conf.get("url", "http://homeassistant.local:8123"),
             token=ha_conf.get("token", ""),
         )
-        self._scene_observer = SceneObserver(
-            self.ha, Path(self.config_path).parent / "scene_effects.json"
-        )
+        self._scene_observer = SceneObserver(self.ha)
 
         sd_brightness = self.config.get("streamdeck", {}).get("brightness", 85)
         streamdeck_conf = self.config.get("streamdeck", {})
