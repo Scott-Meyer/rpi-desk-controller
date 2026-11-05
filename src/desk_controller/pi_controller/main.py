@@ -2867,11 +2867,11 @@ class DeskControllerApp:
                 "lights": None,
             }
             self._scene_error_until.pop(key, None)
-        pressed_at = time.monotonic()
         # Draw pending before Home Assistant is asked, so even an instant
-        # rejection is seen.
+        # rejection is seen; it stays up at least half a second from here.
         self._update_sd_keys()
         self._publish_streamdeck_state()
+        pressed_at = time.monotonic()
 
         def run():
             if turning_off:
