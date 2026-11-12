@@ -405,7 +405,9 @@ streamdeck:
 ```
 
 Actions and visual feedback are independent: any Pi action may also configure
-an exact MQTT feedback topic and active payload.
+an exact MQTT feedback topic and active payload. For an MQTT scene key with a
+feedback topic, sending the command does not select the key. The selection
+changes on observed feedback, including changes initiated away from the desk.
 
 ## Deploying updates to the Pi
 

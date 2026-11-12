@@ -2628,7 +2628,12 @@ class DeskControllerApp:
                     mqtt_topic,
                     button.get("mqtt_payload", ""),
                 )
-                if action_succeeded and group:
+                # Sending a request is not evidence the observed scene changed.
+                if (
+                    action_succeeded
+                    and group
+                    and not str(button.get("state_topic") or "").strip()
+                ):
                     self.active_groups[group] = key
 
         elif action_type == "workstation_slot":
